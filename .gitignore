@@ -1,0 +1,52 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+Packages/
+Package.resolved
+
+# Built app bundle (recreate with ./build-app.sh)
+PaperTape.app/
+*.app/
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# IDEs / editors
+.idea/
+.vscode/
+*.swp
+*~
+.grok/
+
+# Archives & packages
+*.dmg
+*.pkg
+*.zip
+
+# Logs & temp
+*.log
+*.tmp
+*~.nib
+
+# Optional local overrides
+.env
+.env.*

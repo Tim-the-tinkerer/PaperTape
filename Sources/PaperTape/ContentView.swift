@@ -23,7 +23,7 @@ struct ContentView: View {
     @State private var showTerminalPreview = true
     @State private var compression: TapeEngine.CompressionKind = .auto
     @State private var base85: Bool = false
-    /// .Tape write dialect: v6 octal (default), v5 quaternary, v4 ternary, v3 ASCII, v2 visual, or v1 annotated.
+    /// .Tape write dialect: v7 hex (default) … v1 annotated.
     @State private var tapeFileFormat: TapeEngine.TapeFileFormat = .defaultWrite
     @State private var externalOpenURL: URL?
     @State private var externalOpenGeneration = 0
@@ -687,7 +687,11 @@ struct ContentView: View {
                 Text("Terminal paper")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
-                if document.packing.isOctal {
+                if document.packing.isBase256 {
+                    Text("v8 base-256 — experimental maximum density")
+                } else if document.packing.isHexadecimal {
+                    Text("v7 hexadecimal")
+                } else if document.packing.isOctal {
                     Text("v6 octal")
                 } else if document.packing.isQuaternary {
                     Text("v5 quaternary")
@@ -760,7 +764,7 @@ struct ContentView: View {
                         Text("Channel 1 = least significant bit (bit 0). Channel 8 = bit 7.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        Text("Glyphs: v1/v2 Unicode \(String(TapeEngine.holeGlyph))/\(String(TapeEngine.blankGlyph))/\(String(TapeEngine.sprocketGlyph)); v3 * . o; v4 * + . o; v5 * = + . o; v6 * % x = + : , . (eight depths)")
+                        Text("Glyphs: v1–v7 multilevel punches; v8 base-256 — experimental maximum density (grayscale bytes, hex-pair tokens)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -773,12 +777,12 @@ struct ContentView: View {
                         Text("Extension: .\(TapeEngine.fileExtension)  ·  App \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?")")
                         Text("Type: UTF-8 text with a PaperTape header and one visual column token per line.")
                         Text("Round-trips any binary payload losslessly through the punched pattern.")
-                        Text("Pipeline: original → [compress] → [Base85] → [dense pack if v4/v5/v6] → columns. Format picks packing and glyphs (v1–v6).")
+                        Text("Pipeline: original → [compress] → [Base85] → [dense pack if v4–v8] → columns. Format picks packing and glyphs (v1–v8).")
                         Text("Auto compression trials LZFSE/Zlib/LZ4/LZMA. Short messages: any smaller result; large: ≥5% and ≥16 bytes.")
                         Text("Base85 (Ascii85) is optional after compression — printable payload on the strip. It expands (~+25%); use Compress to shrink.")
-                        Text("Header: # compression · # transfer · # block-size · # integrity · # mode · # columns: …|ternary|quaternary|octal · # packing")
-                        Text("v1 annotated · v2 visual · v3 ASCII · v4 ternary (~12.68 b/col) · v5 quat (16) · v6 octal (24 b/col, default).")
-                        Text("Suggested save names include the version: notes-v6.Tape, Project-v3.Tape, …")
+                        Text("Header: # columns: …|ternary|quaternary|octal|hexadecimal|base256 · # packing: full|block3|quat|oct|hex|b256")
+                        Text("v1…v3 binary · v4 (~12.68) · v5 (16) · v6 (24) · v7 hex (32, default) · v8 base-256 — experimental maximum density (64).")
+                        Text("Suggested save names include the version: notes-v7.Tape, Project-v3.Tape, …")
                         Text("Each block: # @block N … crc32/xor/sum8. Folders: # @file path=\"…\" size=… compression=… packing=… per member.")
                         Text("Large files (≥4 MiB) stream raw; folder members under 4 MiB use Compress/Base85 per file.")
                         Text("Double-click a .Tape file in Finder to open it in this app.")

@@ -33,15 +33,17 @@ struct TapeProgress: Sendable {
 /// Writes a `.Tape` file incrementally: header once, then payload bytes as columns
 /// with `# @block` integrity markers. Does not keep the full column array in RAM.
 ///
-/// Dense stream packing: **v4** block3 (3 B → 2 col), **v5** quat (2 B → 1 col),
-/// **v6** oct (3 B → 1 col). All stay O(1) memory for multi-GB files.
+/// Dense stream packing: **v4** block3 … **v7** hex … **v8** base-256 (8 B → 1 col).
+/// All stay O(1) memory for multi-GB files.
 final class TapeStreamWriter {
     private let handle: FileHandle
     private let blockSize: Int
     private let annotateColumns: Bool
     private var blockBuffer = Data()
-    /// Dense column values (ternary/quat fit in low 16 bits; octal uses 24 bits).
+    /// Dense column values (ternary/quat fit in low 16 bits; octal 24-bit; hex full UInt32).
     private var denseValues: [UInt32] = []
+    /// Base-256 columns (8 channel bytes each).
+    private var base256Values: [[UInt8]] = []
     private var blockIndex = 0
     private var columnOffset = 0
     private var totalColumns: Int64 = 0
@@ -50,6 +52,8 @@ final class TapeStreamWriter {
     private let useTernary: Bool
     private let useQuaternary: Bool
     private let useOctal: Bool
+    private let useHexadecimal: Bool
+    private let useBase256: Bool
     private let packing: TapeEngine.PackingMode
     private let style: TapeEngine.GlyphStyle
 
@@ -92,7 +96,13 @@ final class TapeStreamWriter {
         self.useTernary = fileFormat.usesTernaryPacking
         self.useQuaternary = fileFormat.usesQuaternaryPacking
         self.useOctal = fileFormat.usesOctalPacking
-        if useOctal {
+        self.useHexadecimal = fileFormat.usesHexadecimalPacking
+        self.useBase256 = fileFormat.usesBase256Packing
+        if useBase256 {
+            self.packing = .base256
+        } else if useHexadecimal {
+            self.packing = .hexadecimal
+        } else if useOctal {
             self.packing = .octal
         } else if useQuaternary {
             self.packing = .quaternary
@@ -138,6 +148,16 @@ final class TapeStreamWriter {
             headerLines.append("# packing-base: \(TapeEngine.octalBase)")
             headerLines.append("# channel-states: 8")
             headerLines.append("# pack-chunk: 0")
+        } else if useHexadecimal {
+            headerLines.append("# packing: \(packing.rawValue)")
+            headerLines.append("# packing-base: \(TapeEngine.hexadecimalBase)")
+            headerLines.append("# channel-states: 16")
+            headerLines.append("# pack-chunk: 0")
+        } else if useBase256 {
+            headerLines.append("# packing: \(packing.rawValue)")
+            headerLines.append("# packing-base: 18446744073709551616")
+            headerLines.append("# channel-states: 256")
+            headerLines.append("# pack-chunk: 0")
         }
         for line in extraHeaderLines {
             headerLines.append("# \(line)")
@@ -156,6 +176,10 @@ final class TapeStreamWriter {
             headerLines.append("# note: stream packing=quat (2 bytes per column)")
         } else if useOctal {
             headerLines.append("# note: stream packing=oct (3 bytes per column)")
+        } else if useHexadecimal {
+            headerLines.append("# note: stream packing=hex (4 bytes per column)")
+        } else if useBase256 {
+            headerLines.append("# note: stream packing=b256 (8 bytes per column; hex-pair tokens)")
         }
         headerLines.append("# ---")
         headerLines.append("")
@@ -224,6 +248,40 @@ final class TapeStreamWriter {
             return
         }
 
+        if useHexadecimal {
+            // 4 bytes → 1 column; keep 0–3 leftover bytes.
+            blockBuffer.append(data)
+            while blockBuffer.count >= 4 {
+                try cancel?.throwIfCancelled()
+                let take = (blockBuffer.count / 4) * 4
+                let chunkEnd = min(take, 4 * blockSize)
+                let slice = Data(blockBuffer.prefix(chunkEnd))
+                blockBuffer.removeFirst(chunkEnd)
+                denseValues.append(contentsOf: TapeEngine.packHexadecimal(slice))
+                while denseValues.count >= blockSize {
+                    try flushDenseBlock(count: blockSize)
+                }
+            }
+            return
+        }
+
+        if useBase256 {
+            // 8 bytes → 1 column; keep 0–7 leftover bytes.
+            blockBuffer.append(data)
+            while blockBuffer.count >= 8 {
+                try cancel?.throwIfCancelled()
+                let take = (blockBuffer.count / 8) * 8
+                let chunkEnd = min(take, 8 * blockSize)
+                let slice = Data(blockBuffer.prefix(chunkEnd))
+                blockBuffer.removeFirst(chunkEnd)
+                base256Values.append(contentsOf: TapeEngine.packBase256(slice))
+                while base256Values.count >= blockSize {
+                    try flushBase256Block(count: blockSize)
+                }
+            }
+            return
+        }
+
         var idx = data.startIndex
         while idx < data.endIndex {
             try cancel?.throwIfCancelled()
@@ -265,6 +323,22 @@ final class TapeStreamWriter {
             while !denseValues.isEmpty {
                 try flushDenseBlock(count: min(blockSize, denseValues.count))
             }
+        } else if useHexadecimal {
+            if !blockBuffer.isEmpty {
+                denseValues.append(contentsOf: TapeEngine.packHexadecimal(blockBuffer))
+                blockBuffer.removeAll()
+            }
+            while !denseValues.isEmpty {
+                try flushDenseBlock(count: min(blockSize, denseValues.count))
+            }
+        } else if useBase256 {
+            if !blockBuffer.isEmpty {
+                base256Values.append(contentsOf: TapeEngine.packBase256(blockBuffer))
+                blockBuffer.removeAll()
+            }
+            while !base256Values.isEmpty {
+                try flushBase256Block(count: min(blockSize, base256Values.count))
+            }
         } else if !blockBuffer.isEmpty {
             try flushBinaryBlock()
         }
@@ -282,6 +356,10 @@ final class TapeStreamWriter {
             trailer += "# quaternary-columns: \(totalColumns)\n# packing: \(packing.rawValue)\n"
         } else if useOctal {
             trailer += "# octal-columns: \(totalColumns)\n# packing: \(packing.rawValue)\n"
+        } else if useHexadecimal {
+            trailer += "# hexadecimal-columns: \(totalColumns)\n# packing: \(packing.rawValue)\n"
+        } else if useBase256 {
+            trailer += "# base256-columns: \(totalColumns)\n# packing: \(packing.rawValue)\n"
         }
         try handle.write(contentsOf: Data(trailer.utf8))
         try handle.close()
@@ -314,12 +392,33 @@ final class TapeStreamWriter {
         blockBuffer.removeAll(keepingCapacity: true)
     }
 
+    private func flushBase256Block(count: Int) throws {
+        guard count > 0, base256Values.count >= count else { return }
+        let vals = Array(base256Values.prefix(count))
+        base256Values.removeFirst(count)
+        let cols = vals.map { TapeEngine.Column(id: 0, base256Bytes: $0) }
+        let slice = TapeEngine.integrityData(for: cols)
+        let crc = TapeEngine.crc32(slice)
+        let xor = TapeEngine.xorParity(slice)
+        let sum = TapeEngine.sum8(slice)
+        var text = "# @block \(blockIndex) off=\(columnOffset) len=\(count) crc32=\(String(format: "%08X", crc)) xor=\(String(format: "%02X", xor)) sum8=\(String(format: "%02X", sum))\n"
+        for col in cols {
+            text += TapeEngine.columnLine(for: col, annotate: false, style: style) + "\n"
+        }
+        try handle.write(contentsOf: Data(text.utf8))
+        columnOffset += count
+        totalColumns += Int64(count)
+        blockIndex += 1
+    }
+
     private func flushDenseBlock(count: Int) throws {
         guard count > 0, denseValues.count >= count else { return }
         let vals = Array(denseValues.prefix(count))
         denseValues.removeFirst(count)
         let cols: [TapeEngine.Column]
-        if useOctal {
+        if useHexadecimal {
+            cols = vals.map { TapeEngine.Column(id: 0, hexadecimalValue: $0) }
+        } else if useOctal {
             cols = vals.map { TapeEngine.Column(id: 0, octalValue: $0) }
         } else if useQuaternary {
             cols = vals.map { TapeEngine.Column(id: 0, quaternaryValue: UInt16(truncatingIfNeeded: $0)) }
@@ -368,6 +467,9 @@ final class TapeStreamReader {
     /// Ternary/quat store UInt16 values in the low half; octal uses full 24-bit values.
     private var ternaryDigits: [UInt32] = []
     private var currentBlockValues: [UInt32] = []
+    /// Base-256 columns buffered for stream decode.
+    private var base256Digits: [[UInt8]] = []
+    private var currentBlockBase256: [[UInt8]] = []
     /// Odd leftover ternary block3 digit carried across integrity blocks.
     private var block3CarryDigit: UInt32?
     /// Binary bytes emitted so far for dense stream unpack (for punched-size truncate).
@@ -445,6 +547,8 @@ final class TapeStreamReader {
                 }
             } else if trimmed.hasPrefix("# columns:") {
                 let c = String(trimmed.dropFirst("# columns:".count)).trimmingCharacters(in: .whitespaces).lowercased()
+                if c == "base256" || c == "b256", packing == .binary { packing = .base256 }
+                if c == "hexadecimal" || c == "hex", packing == .binary { packing = .hexadecimal }
                 if c == "octal", packing == .binary { packing = .octal }
                 if c == "quaternary", packing == .binary { packing = .quaternary }
                 if c == "ternary", packing == .binary { packing = .ternaryFull }
@@ -452,7 +556,9 @@ final class TapeStreamReader {
                 let vStr = trimmed.replacingOccurrences(of: "# PaperTape File v", with: "")
                 let ver = Int(vStr.trimmingCharacters(in: .whitespaces)) ?? 0
                 if packing == .binary {
-                    if ver >= 6 { packing = .octal }
+                    if ver >= 8 { packing = .base256 }
+                    else if ver >= 7 { packing = .hexadecimal }
+                    else if ver >= 6 { packing = .octal }
                     else if ver >= 5 { packing = .quaternary }
                     else if ver >= 4 { packing = .ternaryFull }
                 }
@@ -602,6 +708,8 @@ final class TapeStreamReader {
                     currentBlockBytes.reserveCapacity(max(meta.len, blockSize))
                     currentBlockValues = []
                     currentBlockValues.reserveCapacity(max(meta.len, blockSize))
+                    currentBlockBase256 = []
+                    currentBlockBase256.reserveCapacity(max(meta.len, blockSize))
                 }
                 continue
             }
@@ -627,13 +735,21 @@ final class TapeStreamReader {
             if packing.isMultistate {
                 let preferQ = packing.isQuaternary
                 let preferO = packing.isOctal
+                let preferH = packing.isHexadecimal
+                let preferB = packing.isBase256
                 guard let col = TapeEngine.parseColumnToken(
                     tokenPart,
                     preferTernary: packing.isTernary,
                     preferQuaternary: preferQ,
-                    preferOctal: preferO
+                    preferOctal: preferO,
+                    preferHexadecimal: preferH,
+                    preferBase256: preferB
                 ) else { continue }
-                if preferO {
+                if preferB {
+                    currentBlockBase256.append(col.base256Bytes)
+                } else if preferH {
+                    currentBlockValues.append(col.hexadecimalValue)
+                } else if preferO {
                     currentBlockValues.append(col.octalValue)
                 } else if preferQ {
                     currentBlockValues.append(UInt32(col.quaternaryValue))
@@ -641,7 +757,8 @@ final class TapeStreamReader {
                     currentBlockValues.append(UInt32(col.ternaryValue))
                 }
                 // Integrity length counts columns
-                if let stored = currentBlockStored, stored.len > 0, currentBlockValues.count >= stored.len {
+                let blockCount = preferB ? currentBlockBase256.count : currentBlockValues.count
+                if let stored = currentBlockStored, stored.len > 0, blockCount >= stored.len {
                     try flushCurrentBlockIfNeeded()
                     if let pending = takePendingData() {
                         return .data(pending)
@@ -685,7 +802,9 @@ final class TapeStreamReader {
             ternaryDigits = []
         }
         // Octal / quaternary / block3 may have pending bytes; trim to punched-size if known.
-        if packing == .octal || packing == .quaternary || packing == .ternaryBlock3, let pending = takePendingData() {
+        if packing == .base256 || packing == .hexadecimal || packing == .octal
+            || packing == .quaternary || packing == .ternaryBlock3,
+           let pending = takePendingData() {
             if let lim = denseByteLimit, ternaryBinaryEmitted > lim {
                 let over = Int(ternaryBinaryEmitted - lim)
                 let keep = max(0, pending.count - over)
@@ -777,12 +896,63 @@ final class TapeStreamReader {
 
     private func flushCurrentBlockIfNeeded() throws {
         if packing.isMultistate {
+            if packing.isBase256 {
+                guard !currentBlockBase256.isEmpty || currentBlockStored != nil else { return }
+                let vals = currentBlockBase256
+                if let stored = currentBlockStored {
+                    blocksChecked += 1
+                    let cols = vals.map { TapeEngine.Column(id: 0, base256Bytes: $0) }
+                    let integ = TapeEngine.integrityData(for: cols)
+                    let crc = integ.isEmpty ? 0 : TapeEngine.crc32(integ)
+                    let xor = integ.isEmpty ? 0 : TapeEngine.xorParity(integ)
+                    let sum = integ.isEmpty ? 0 : TapeEngine.sum8(integ)
+                    let lengthMismatch = stored.len > 0 && vals.count != stored.len
+                    let checksumMismatch = !integ.isEmpty && (crc != stored.crc || xor != stored.xor || sum != stored.sum)
+                    if vals.isEmpty || lengthMismatch || checksumMismatch {
+                        failedBlocks.append(
+                            TapeEngine.IntegrityBlock(
+                                index: blocksChecked - 1,
+                                offset: 0,
+                                length: vals.count,
+                                storedCRC32: stored.crc,
+                                storedXOR: stored.xor,
+                                storedSum8: stored.sum,
+                                computedCRC32: vals.isEmpty || lengthMismatch ? stored.crc &+ 1 : crc,
+                                computedXOR: vals.isEmpty || lengthMismatch ? stored.xor &+ 1 : xor,
+                                computedSum8: vals.isEmpty || lengthMismatch ? stored.sum &+ 1 : sum
+                            )
+                        )
+                    }
+                }
+                let limit = denseByteLimit
+                var emitted = Data()
+                for col in vals {
+                    if let lim = limit, ternaryBinaryEmitted >= lim { break }
+                    // Emit MSB-first (ch8…ch1)
+                    var quad = Array(col.reversed())
+                    if let lim = limit {
+                        let room = Int(lim - ternaryBinaryEmitted)
+                        if room <= 0 { break }
+                        if quad.count > room { quad = Array(quad.prefix(room)) }
+                    }
+                    emitted.append(contentsOf: quad)
+                    ternaryBinaryEmitted += Int64(quad.count)
+                }
+                if !emitted.isEmpty {
+                    pendingData = (pendingData ?? Data()) + emitted
+                }
+                currentBlockBase256 = []
+                currentBlockStored = nil
+                return
+            }
             guard !currentBlockValues.isEmpty || currentBlockStored != nil else { return }
             let vals = currentBlockValues
             if let stored = currentBlockStored {
                 blocksChecked += 1
                 let cols: [TapeEngine.Column]
-                if packing.isOctal {
+                if packing.isHexadecimal {
+                    cols = vals.map { TapeEngine.Column(id: 0, hexadecimalValue: $0) }
+                } else if packing.isOctal {
                     cols = vals.map { TapeEngine.Column(id: 0, octalValue: $0) }
                 } else if packing.isQuaternary {
                     cols = vals.map { TapeEngine.Column(id: 0, quaternaryValue: UInt16(truncatingIfNeeded: $0)) }
@@ -811,7 +981,30 @@ final class TapeStreamReader {
                     )
                 }
             }
-            if packing == .octal {
+            if packing == .hexadecimal {
+                // Stream-decode: each value → up to 4 bytes. O(1) memory.
+                let limit = denseByteLimit
+                var emitted = Data()
+                for v in vals {
+                    if let lim = limit, ternaryBinaryEmitted >= lim { break }
+                    var quad = [
+                        UInt8((v >> 24) & 0xFF),
+                        UInt8((v >> 16) & 0xFF),
+                        UInt8((v >> 8) & 0xFF),
+                        UInt8(v & 0xFF),
+                    ]
+                    if let lim = limit {
+                        let room = Int(lim - ternaryBinaryEmitted)
+                        if room <= 0 { break }
+                        if quad.count > room { quad = Array(quad.prefix(room)) }
+                    }
+                    emitted.append(contentsOf: quad)
+                    ternaryBinaryEmitted += Int64(quad.count)
+                }
+                if !emitted.isEmpty {
+                    pendingData = (pendingData ?? Data()) + emitted
+                }
+            } else if packing == .octal {
                 // Stream-decode: each value → up to 3 bytes. O(1) memory.
                 let limit = denseByteLimit
                 var emitted = Data()
@@ -1260,6 +1453,12 @@ extension TapeEngine {
         punchedBytes: Int,
         fileFormat: TapeFileFormat
     ) -> Int64 {
+        if fileFormat.usesBase256Packing, punchedBytes > 0 {
+            return Int64((punchedBytes + 7) / 8)
+        }
+        if fileFormat.usesHexadecimalPacking, punchedBytes > 0 {
+            return Int64((punchedBytes + 3) / 4)
+        }
         if fileFormat.usesOctalPacking, punchedBytes > 0 {
             return Int64((punchedBytes + 2) / 3)
         }
@@ -1597,6 +1796,18 @@ extension TapeEngine {
             headerLines.append("# channel-states: 8")
             headerLines.append("# pack-chunk: 0")
             headerLines.append("# note: octal archive — 3 bytes per column")
+        } else if fileFormat.usesHexadecimalPacking {
+            headerLines.append("# packing: hex")
+            headerLines.append("# packing-base: \(hexadecimalBase)")
+            headerLines.append("# channel-states: 16")
+            headerLines.append("# pack-chunk: 0")
+            headerLines.append("# note: hexadecimal archive — 4 bytes per column")
+        } else if fileFormat.usesBase256Packing {
+            headerLines.append("# packing: b256")
+            headerLines.append("# packing-base: 18446744073709551616")
+            headerLines.append("# channel-states: 256")
+            headerLines.append("# pack-chunk: 0")
+            headerLines.append("# note: base-256 archive — 8 bytes per column (grayscale channels; hex-pair tokens)")
         }
         headerLines.append("# note: each @file may compress independently; files ≥\(streamingByteThreshold / (1024 * 1024))MiB stream raw")
         headerLines.append("# ---")
@@ -1690,6 +1901,12 @@ extension TapeEngine {
                 } else if fileFormat.usesOctalPacking {
                     packMode = "oct"
                     packChunk = 0
+                } else if fileFormat.usesHexadecimalPacking {
+                    packMode = "hex"
+                    packChunk = 0
+                } else if fileFormat.usesBase256Packing {
+                    packMode = "b256"
+                    packChunk = 0
                 } else {
                     packMode = "binary"
                     packChunk = 0
@@ -1719,6 +1936,10 @@ extension TapeEngine {
                     packMode = "quat"
                 } else if fileFormat.usesOctalPacking {
                     packMode = "oct"
+                } else if fileFormat.usesHexadecimalPacking {
+                    packMode = "hex"
+                } else if fileFormat.usesBase256Packing {
+                    packMode = "b256"
                 } else {
                     packMode = "binary"
                 }
@@ -1745,6 +1966,10 @@ extension TapeEngine {
                     streamPack = "quat"
                 } else if fileFormat.usesOctalPacking {
                     streamPack = "oct"
+                } else if fileFormat.usesHexadecimalPacking {
+                    streamPack = "hex"
+                } else if fileFormat.usesBase256Packing {
+                    streamPack = "b256"
                 } else {
                     streamPack = "binary"
                 }
@@ -1769,7 +1994,35 @@ extension TapeEngine {
                 let ternary = fileFormat.usesTernaryPacking
                 let quaternary = fileFormat.usesQuaternaryPacking
                 let octal = fileFormat.usesOctalPacking
+                let hexadecimal = fileFormat.usesHexadecimalPacking
+                let base256 = fileFormat.usesBase256Packing
+                var base256Pending: [[UInt8]] = []
                 let style = GlyphStyle.forFormat(fileFormat)
+
+                func flushBase256Columns(_ count: Int) throws {
+                    guard count > 0, base256Pending.count >= count else { return }
+                    try cancel?.throwIfCancelled()
+                    let vals = Array(base256Pending.prefix(count))
+                    base256Pending.removeFirst(count)
+                    let cols = vals.map { Column(id: 0, base256Bytes: $0) }
+                    let integ = integrityData(for: cols)
+                    let crc = crc32(integ)
+                    let xor = xorParity(integ)
+                    let sum = sum8(integ)
+                    let len = cols.count
+                    var text =
+                        "# @block \(blockIndex) off=\(columnOffset) len=\(len) "
+                        + "crc32=\(String(format: "%08X", crc)) "
+                        + "xor=\(String(format: "%02X", xor)) "
+                        + "sum8=\(String(format: "%02X", sum))\n"
+                    for col in cols {
+                        text += columnLine(for: col, annotate: false, style: style) + "\n"
+                    }
+                    try handle.write(contentsOf: Data(text.utf8))
+                    columnOffset += len
+                    globalColumns += Int64(len)
+                    blockIndex += 1
+                }
 
                 func flushDenseColumns(_ count: Int) throws {
                     guard count > 0, densePending.count >= count else { return }
@@ -1777,7 +2030,9 @@ extension TapeEngine {
                     let vals = Array(densePending.prefix(count))
                     densePending.removeFirst(count)
                     let cols: [Column]
-                    if octal {
+                    if hexadecimal {
+                        cols = vals.map { Column(id: 0, hexadecimalValue: $0) }
+                    } else if octal {
                         cols = vals.map { Column(id: 0, octalValue: $0) }
                     } else if quaternary {
                         cols = vals.map { Column(id: 0, quaternaryValue: UInt16(truncatingIfNeeded: $0)) }
@@ -1855,6 +2110,28 @@ extension TapeEngine {
                                 try flushDenseColumns(bs)
                             }
                         }
+                    } else if hexadecimal {
+                        blockBuffer.append(chunk)
+                        while blockBuffer.count >= 4 {
+                            let take = min((blockBuffer.count / 4) * 4, 4 * bs)
+                            let piece = Data(blockBuffer.prefix(take))
+                            blockBuffer.removeFirst(take)
+                            densePending.append(contentsOf: packHexadecimal(piece))
+                            while densePending.count >= bs {
+                                try flushDenseColumns(bs)
+                            }
+                        }
+                    } else if base256 {
+                        blockBuffer.append(chunk)
+                        while blockBuffer.count >= 8 {
+                            let take = min((blockBuffer.count / 8) * 8, 8 * bs)
+                            let piece = Data(blockBuffer.prefix(take))
+                            blockBuffer.removeFirst(take)
+                            base256Pending.append(contentsOf: packBase256(piece))
+                            while base256Pending.count >= bs {
+                                try flushBase256Columns(bs)
+                            }
+                        }
                     } else {
                         var i = chunk.startIndex
                         while i < chunk.endIndex {
@@ -1899,6 +2176,22 @@ extension TapeEngine {
                     while !densePending.isEmpty {
                         try flushDenseColumns(min(bs, densePending.count))
                     }
+                } else if hexadecimal {
+                    if !blockBuffer.isEmpty {
+                        densePending.append(contentsOf: packHexadecimal(blockBuffer))
+                        blockBuffer.removeAll()
+                    }
+                    while !densePending.isEmpty {
+                        try flushDenseColumns(min(bs, densePending.count))
+                    }
+                } else if base256 {
+                    if !blockBuffer.isEmpty {
+                        base256Pending.append(contentsOf: packBase256(blockBuffer))
+                        blockBuffer.removeAll()
+                    }
+                    while !base256Pending.isEmpty {
+                        try flushBase256Columns(min(bs, base256Pending.count))
+                    }
                 } else {
                     try flushBinaryBlock()
                 }
@@ -1939,7 +2232,11 @@ extension TapeEngine {
                     ? "# quaternary-columns: \(globalColumns)\n"
                     : fileFormat.usesOctalPacking
                         ? "# octal-columns: \(globalColumns)\n"
-                        : "")
+                        : fileFormat.usesHexadecimalPacking
+                            ? "# hexadecimal-columns: \(globalColumns)\n"
+                            : fileFormat.usesBase256Packing
+                                ? "# base256-columns: \(globalColumns)\n"
+                                : "")
             + "# compressed-members: \(compressedFiles)\n"
         try handle.write(contentsOf: Data(trailer.utf8))
         progress?(TapeProgress(phase: "Done", unitsCompleted: bytesDone, unitsTotal: totalBytes))
@@ -2017,6 +2314,70 @@ extension TapeEngine {
     ) throws -> Int {
         guard !data.isEmpty else { return 0 }
         let bs = max(1, blockSize)
+
+        if fileFormat.usesBase256Packing {
+            let values = packBase256(data)
+            let style = GlyphStyle.forFormat(fileFormat)
+            var colOffset = 0
+            var index = 0
+            var total = 0
+            while colOffset < values.count {
+                try cancel?.throwIfCancelled()
+                let end = min(colOffset + bs, values.count)
+                let sliceVals = Array(values[colOffset..<end])
+                let cols = sliceVals.map { Column(id: 0, base256Bytes: $0) }
+                let integ = integrityData(for: cols)
+                let crc = crc32(integ)
+                let xor = xorParity(integ)
+                let sum = sum8(integ)
+                let len = cols.count
+                var text =
+                    "# @block \(index) off=\(colOffset) len=\(len) "
+                    + "crc32=\(String(format: "%08X", crc)) "
+                    + "xor=\(String(format: "%02X", xor)) "
+                    + "sum8=\(String(format: "%02X", sum))\n"
+                for col in cols {
+                    text += columnLine(for: col, annotate: false, style: style) + "\n"
+                }
+                try handle.write(contentsOf: Data(text.utf8))
+                total += len
+                colOffset = end
+                index += 1
+            }
+            return total
+        }
+
+        if fileFormat.usesHexadecimalPacking {
+            let values = packHexadecimal(data)
+            let style = GlyphStyle.forFormat(fileFormat)
+            var colOffset = 0
+            var index = 0
+            var total = 0
+            while colOffset < values.count {
+                try cancel?.throwIfCancelled()
+                let end = min(colOffset + bs, values.count)
+                let sliceVals = Array(values[colOffset..<end])
+                let cols = sliceVals.map { Column(id: 0, hexadecimalValue: $0) }
+                let integ = integrityData(for: cols)
+                let crc = crc32(integ)
+                let xor = xorParity(integ)
+                let sum = sum8(integ)
+                let len = cols.count
+                var text =
+                    "# @block \(index) off=\(colOffset) len=\(len) "
+                    + "crc32=\(String(format: "%08X", crc)) "
+                    + "xor=\(String(format: "%02X", xor)) "
+                    + "sum8=\(String(format: "%02X", sum))\n"
+                for col in cols {
+                    text += columnLine(for: col, annotate: false, style: style) + "\n"
+                }
+                try handle.write(contentsOf: Data(text.utf8))
+                total += len
+                colOffset = end
+                index += 1
+            }
+            return total
+        }
 
         if fileFormat.usesOctalPacking {
             let values = packOctal(data)
@@ -2205,6 +2566,25 @@ extension TapeEngine {
             try handle.write(contentsOf: Data(text.utf8))
             return len
         }
+        if fileFormat.usesHexadecimalPacking {
+            let values = packHexadecimal(slice)
+            let cols = values.map { Column(id: 0, hexadecimalValue: $0) }
+            let integ = integrityData(for: cols)
+            let crc = crc32(integ)
+            let xor = xorParity(integ)
+            let sum = sum8(integ)
+            let len = cols.count
+            var text =
+                "# @block \(index) off=\(offset) len=\(len) "
+                + "crc32=\(String(format: "%08X", crc)) "
+                + "xor=\(String(format: "%02X", xor)) "
+                + "sum8=\(String(format: "%02X", sum))\n"
+            for col in cols {
+                text += columnLine(for: col, annotate: false, style: style) + "\n"
+            }
+            try handle.write(contentsOf: Data(text.utf8))
+            return len
+        }
 
         let len = slice.count
         let crc = crc32(slice)
@@ -2292,7 +2672,11 @@ extension TapeEngine {
                 headerPacking = PackingMode.parse(String(t.dropFirst("# packing:".count)))
             } else if t.hasPrefix("# columns:") {
                 let c = String(t.dropFirst("# columns:".count)).trimmingCharacters(in: .whitespaces).lowercased()
-                if c == "octal", headerPacking == .binary {
+                if c == "base256" || c == "b256", headerPacking == .binary {
+                    headerPacking = .base256
+                } else if c == "hexadecimal" || c == "hex", headerPacking == .binary {
+                    headerPacking = .hexadecimal
+                } else if c == "octal", headerPacking == .binary {
                     headerPacking = .octal
                 } else if c == "quaternary", headerPacking == .binary {
                     headerPacking = .quaternary
@@ -2303,7 +2687,9 @@ extension TapeEngine {
                 let vStr = t.replacingOccurrences(of: "# PaperTape File v", with: "")
                 let ver = Int(vStr.trimmingCharacters(in: .whitespaces)) ?? 0
                 if headerPacking == .binary {
-                    if ver >= 6 { headerPacking = .octal }
+                    if ver >= 8 { headerPacking = .base256 }
+                    else if ver >= 7 { headerPacking = .hexadecimal }
+                    else if ver >= 6 { headerPacking = .octal }
                     else if ver >= 5 { headerPacking = .quaternary }
                     else if ver >= 4 { headerPacking = .ternaryFull }
                 }
@@ -2350,8 +2736,9 @@ extension TapeEngine {
         var currentPackChunk: Int?
         var punchedBuffer = Data()
         var ternaryDigits: [UInt32] = []
+        var base256Digits: [[UInt8]] = []
         var needsBuffer = false
-        /// Raw dense stream (block3 / quat / oct) → stream decode to `currentWriter`.
+        /// Raw dense stream (block3 / quat / oct / hex / b256) → stream decode to `currentWriter`.
         var streamBlock3 = false
         var block3Emitted: Int64 = 0
         var blockCols: [Column] = []
@@ -2375,7 +2762,27 @@ extension TapeEngine {
             // Only cap when size/punched is a positive length; 0 means unknown, not empty.
             let limit = positiveLimit(currentPunchedSize, currentOriginalSize)
             var out = Data()
-            if currentPacking == .octal {
+            if currentPacking == .base256 {
+                // vals holds packed UInt32 pairs? — archive uses Column path; this branch unused for b256.
+                // Handled via emitBase256 below.
+            } else if currentPacking == .hexadecimal {
+                for v in vals {
+                    if let lim = limit, block3Emitted >= lim { break }
+                    var quad = [
+                        UInt8((v >> 24) & 0xFF),
+                        UInt8((v >> 16) & 0xFF),
+                        UInt8((v >> 8) & 0xFF),
+                        UInt8(v & 0xFF),
+                    ]
+                    if let lim = limit {
+                        let room = Int(lim - block3Emitted)
+                        if room <= 0 { break }
+                        if quad.count > room { quad = Array(quad.prefix(room)) }
+                    }
+                    out.append(contentsOf: quad)
+                    block3Emitted += Int64(quad.count)
+                }
+            } else if currentPacking == .octal {
                 for v in vals {
                     if let lim = limit, block3Emitted >= lim { break }
                     var triple = [
@@ -2439,6 +2846,26 @@ extension TapeEngine {
             }
         }
 
+        func emitBase256Columns(_ cols: [[UInt8]], to writer: FileHandle) throws {
+            let limit = positiveLimit(currentPunchedSize, currentOriginalSize)
+            var out = Data()
+            for col in cols {
+                if let lim = limit, block3Emitted >= lim { break }
+                var bytes8 = Array(col.reversed()) // MSB first
+                if let lim = limit {
+                    let room = Int(lim - block3Emitted)
+                    if room <= 0 { break }
+                    if bytes8.count > room { bytes8 = Array(bytes8.prefix(room)) }
+                }
+                out.append(contentsOf: bytes8)
+                block3Emitted += Int64(bytes8.count)
+            }
+            if !out.isEmpty {
+                try writer.write(contentsOf: out)
+                bytes += Int64(out.count)
+            }
+        }
+
         func finishMember() throws {
             try flushBlockIntoMember()
             // Flush odd block3 carry if any (pair with zero digit).
@@ -2472,8 +2899,16 @@ extension TapeEngine {
                                 ? ternaryDigits.count * 2
                                 : currentPacking == .octal
                                     ? ternaryDigits.count * 3
-                                    : ternaryDigits.count)
-                    if currentPacking == .octal {
+                                    : currentPacking == .hexadecimal
+                                        ? ternaryDigits.count * 4
+                                        : currentPacking == .base256
+                                            ? base256Digits.count * 8
+                                            : ternaryDigits.count)
+                    if currentPacking == .base256 {
+                        stage = unpackBase256(base256Digits, byteCount: count)
+                    } else if currentPacking == .hexadecimal {
+                        stage = unpackHexadecimal(ternaryDigits, byteCount: count)
+                    } else if currentPacking == .octal {
                         stage = unpackOctal(ternaryDigits, byteCount: count)
                     } else if currentPacking == .quaternary {
                         let digits16 = ternaryDigits.map { UInt16(truncatingIfNeeded: $0) }
@@ -2523,6 +2958,7 @@ extension TapeEngine {
             currentPackChunk = nil
             punchedBuffer = Data()
             ternaryDigits = []
+            base256Digits = []
             needsBuffer = false
             streamBlock3 = false
             block3Emitted = 0
@@ -2544,18 +2980,28 @@ extension TapeEngine {
             }
             if !blockCols.isEmpty {
                 if streamBlock3, let w = currentWriter {
-                    let vals: [UInt32]
-                    if currentPacking.isOctal {
-                        vals = blockCols.map(\.octalValue)
-                    } else if currentPacking.isQuaternary {
-                        vals = blockCols.map { UInt32($0.quaternaryValue) }
+                    if currentPacking.isBase256 {
+                        try emitBase256Columns(blockCols.map(\.base256Bytes), to: w)
                     } else {
-                        vals = blockCols.map { UInt32($0.ternaryValue) }
+                        let vals: [UInt32]
+                        if currentPacking.isHexadecimal {
+                            vals = blockCols.map(\.hexadecimalValue)
+                        } else if currentPacking.isOctal {
+                            vals = blockCols.map(\.octalValue)
+                        } else if currentPacking.isQuaternary {
+                            vals = blockCols.map { UInt32($0.quaternaryValue) }
+                        } else {
+                            vals = blockCols.map { UInt32($0.ternaryValue) }
+                        }
+                        try emitDenseStreamValues(vals, to: w)
                     }
-                    try emitDenseStreamValues(vals, to: w)
                 } else if currentPacking.isMultistate {
                     for col in blockCols {
-                        if currentPacking.isOctal {
+                        if currentPacking.isBase256 {
+                            base256Digits.append(col.base256Bytes)
+                        } else if currentPacking.isHexadecimal {
+                            ternaryDigits.append(col.hexadecimalValue)
+                        } else if currentPacking.isOctal {
                             ternaryDigits.append(col.octalValue)
                         } else if currentPacking.isQuaternary {
                             ternaryDigits.append(UInt32(col.quaternaryValue))
@@ -2609,7 +3055,9 @@ extension TapeEngine {
                 streamBlock3 =
                     (currentPacking == .ternaryBlock3
                         || currentPacking == .quaternary
-                        || currentPacking == .octal)
+                        || currentPacking == .octal
+                        || currentPacking == .hexadecimal
+                        || currentPacking == .base256)
                     && meta.compression == .none
                     && meta.transfer == .identity
                 needsBuffer =
@@ -2618,6 +3066,7 @@ extension TapeEngine {
                     || (currentPacking.isMultistate && !streamBlock3)
                 punchedBuffer = Data()
                 ternaryDigits = []
+                base256Digits = []
                 block3Emitted = 0
                 if let punched = meta.punchedSize, punched > 0, needsBuffer {
                     // Refuse pathological members that would force multi-GB buffers.
@@ -2688,11 +3137,15 @@ extension TapeEngine {
             let preferTernary = currentPacking.isTernary || headerPacking.isTernary
             let preferQuat = currentPacking.isQuaternary || headerPacking.isQuaternary
             let preferOct = currentPacking.isOctal || headerPacking.isOctal
+            let preferHex = currentPacking.isHexadecimal || headerPacking.isHexadecimal
+            let preferB256 = currentPacking.isBase256 || headerPacking.isBase256
             guard let col = parseColumnToken(
                 tokenPart,
                 preferTernary: preferTernary,
                 preferQuaternary: preferQuat,
-                preferOctal: preferOct
+                preferOctal: preferOct,
+                preferHexadecimal: preferHex,
+                preferBase256: preferB256
             ) else { continue }
             blockCols.append(col)
             if let st = blockStored, st.len > 0, blockCols.count >= st.len {

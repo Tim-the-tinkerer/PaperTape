@@ -25,11 +25,17 @@ extension TapeEngine {
         case quaternary = "quat"
         /// Octal: every 3 bytes → 1 column (v6; exactly 24 bits/col).
         case octal = "oct"
+        /// Hexadecimal: every 4 bytes → 1 column (v7; exactly 32 bits/col).
+        case hexadecimal = "hex"
+        /// Base-256: every 8 bytes → 1 column (v8; exactly 64 bits/col).
+        case base256 = "b256"
 
         var isTernary: Bool { self == .ternaryFull || self == .ternaryBlock3 }
         var isQuaternary: Bool { self == .quaternary }
         var isOctal: Bool { self == .octal }
-        /// Non-binary packing (ternary / quaternary / octal).
+        var isHexadecimal: Bool { self == .hexadecimal }
+        var isBase256: Bool { self == .base256 }
+        /// Non-binary packing (ternary / quat / oct / hex / base-256).
         var isMultistate: Bool { self != .binary }
 
         static func parse(_ raw: String) -> PackingMode {
@@ -43,6 +49,10 @@ extension TapeEngine {
                 return .quaternary
             case "oct", "octal", "base16777216", "16777216", "o3", "8":
                 return .octal
+            case "hex", "hexadecimal", "base16", "base4294967296", "4294967296", "h4", "16":
+                return .hexadecimal
+            case "b256", "base256", "base-256", "byte", "256", "base18446744073709551616":
+                return .base256
             case "binary", "none", "identity", "":
                 return .binary
             default:
@@ -394,8 +404,11 @@ extension TapeEngine {
         case .quaternary:
             return packQuaternary(data)
         case .octal:
-            // Octal values need UInt32 — use packOctal(_:) instead of this UInt16 API.
             preconditionFailure("packTernary does not support .octal; call packOctal")
+        case .hexadecimal:
+            preconditionFailure("packTernary does not support .hexadecimal; call packHexadecimal")
+        case .base256:
+            preconditionFailure("packTernary does not support .base256; call packBase256")
         }
     }
 
@@ -425,6 +438,10 @@ extension TapeEngine {
             return unpackQuaternary(digits, byteCount: byteCount)
         case .octal:
             preconditionFailure("unpackTernary does not support .octal; call unpackOctal")
+        case .hexadecimal:
+            preconditionFailure("unpackTernary does not support .hexadecimal; call unpackHexadecimal")
+        case .base256:
+            preconditionFailure("unpackTernary does not support .base256; call unpackBase256")
         }
     }
 

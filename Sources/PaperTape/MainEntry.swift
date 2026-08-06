@@ -11,7 +11,7 @@ struct MainEntry {
         }
 
         
-        // CLI: --pack-folder <dir> <dest.Tape> [--format v6]
+        // CLI: --pack-folder <dir> <dest.Tape> [--format v7]
         if let idx = CommandLine.arguments.firstIndex(of: "--pack-folder"),
            CommandLine.arguments.count > idx + 2 {
             let root = URL(fileURLWithPath: CommandLine.arguments[idx + 1], isDirectory: true)
@@ -46,7 +46,7 @@ struct MainEntry {
             }
         }
 
-// CLI: --encode-file <src> <dest> [--format v3|v4|v5|v6]
+// CLI: --encode-file <src> <dest> [--format v3|v4|v5|v6|v7]
         if let idx = CommandLine.arguments.firstIndex(of: "--encode-file"),
            CommandLine.arguments.count > idx + 2 {
             let src = URL(fileURLWithPath: CommandLine.arguments[idx + 1])
@@ -242,9 +242,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Encode data as classic 8-channel punched paper tape.
 
                 Binary dialects (v1–v3): one byte per column (ch1 = LSB).
-                v4 ternary (~12.68 bits/col); v5 quaternary (16); v6 octal (24 bits/col, default).
+                Default write: v7 hexadecimal (32 bits/col). v8 base-256 — experimental maximum density (64 bits/col, grayscale).
                 .Tape files round-trip losslessly; only v1 embeds a terminal-paper preview footer.
-                Suggested save names: name-v1.Tape … name-v6.Tape.
+                Suggested save names: name-v1.Tape … name-v8.Tape.
 
                 Double-click a .Tape file to open it.
                 """,

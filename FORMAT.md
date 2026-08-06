@@ -1,41 +1,40 @@
 # PaperTape `.Tape` format versions
 
-This document describes the on-disk **write dialects** for `.Tape` files (v1–v6), how they differ, and **approximate file size** impact.
+This document describes the on-disk **write dialects** for `.Tape` files (v1–v8), how they differ, and **approximate file size** impact.
 
-Readers in current PaperTape accept any version they understand (Unicode and ASCII glyphs are both recognized when parsing; v4 ternary; v5 quaternary; v6 octal).
+Readers accept any known version (v4 ternary … v8 base-256).
 
-For app usage and build instructions, see [README.md](README.md). App version: **1.10.3**.
+For app usage and build instructions, see [README.md](README.md). App version: **1.12.1**.
 
 ---
 
 ## Pipeline (shared)
 
 ```
-original bytes → [compress] → [Base85] → [dense pack if v4/v5/v6] → column tokens → .Tape text
+original bytes → [compress] → [Base85] → [dense pack if v4–v8] → column tokens → .Tape text
 ```
 
-- **v1–v3**: one binary byte → one column (8 bits/column).
-- **v4**: binary payload packed into base-6561 digits (~12.68 bits/column).
-- **v5**: binary payload packed as 2 bytes → 1 column (**16 bits/column**).
-- **v6**: binary payload packed as 3 bytes → 1 column (**24 bits/column**).
+- **v1–v3**: 1 byte → 1 column (8 bits/col).
+- **v4**: base-6561 (~12.68 bits/col).
+- **v5**: 2 bytes → 1 column (**16** bits).
+- **v6**: 3 bytes → 1 column (**24** bits).
+- **v7**: 4 bytes → 1 column (**32** bits).
+- **v8**: 8 bytes → 1 column (**64** bits).
 
-Compression codecs and integrity math (CRC-32 + XOR + SUM8) apply in all dialects. Multi-state integrity uses the packed column value (v4/v5: LE `UInt16`; v6: LE 3-byte 24-bit value).
+Integrity (CRC-32 + XOR + SUM8) uses the packed column value: v1–v3 1 B; v4/v5 LE UInt16; v6 3 B; v7 4 B; **v8 8 channel bytes**.
 
 ---
 
 ## Version summary
 
-| | **v1** | **v2** | **v3** | **v4 ternary** | **v5 quat** | **v6 octal** (default) |
-|--|--------|--------|--------|----------------|-------------|-------------------------|
-| Header | `v1` | `v2` | `v3` | `v4` | `v5` | `v6` |
-| `# columns:` | `annotated` | `compact` | `ascii` | `ternary` | `quaternary` | `octal` |
-| Channel states | 2 | 2 | 2 | **3** | **4** | **8** |
-| Glyphs | `●·○` | `●·○` | `* . o` | `* + . o` | `* = + . o` | `* % x = + : , . o` |
-| Example | `··●○·●·●·` | same | `...o*.*.*` | `..+o*+.*+` | `.=+o*=+.*` | `.,:o+=x%*` |
-| Packing | 1 B/col | 1 B/col | 1 B/col | ~12.68 b/col | **16 b/col** | **24 b/col** |
-| Annotations | yes | — | — | — | — | — |
-| Preview footer | yes | — | — | — | — | — |
-| Integrity | 1 B | 1 B | 1 B | UInt16 | UInt16 | 3 B |
+| | v1–v3 | v4 | v5 | v6 | **v7** (default) | v8 base-256 — experimental maximum density |
+|--|-------|----|----|----|------------------|---------------------------------------------|
+| `# columns:` | annotated/compact/ascii | ternary | quaternary | octal | **hexadecimal** | base256 |
+| Channel states | 2 | 3 | 4 | 8 | 16 | **256** |
+| Bits/col | 8 | ~12.68 | 16 | 24 | 32 | **64** |
+| Bytes/col | 1 | ~0.63 | 2 | 3 | 4 | **8** |
+| Token | 9 glyphs | 9 glyphs | 9 glyphs | 9 glyphs | 9 glyphs | **17 hex+`o`** |
+| Integrity | 1 B | UInt16 | UInt16 | 3 B | 4 B | **8 B** |
 
 **Token layout** (always 9 characters; ch1 = least-significant digit or bit):
 
@@ -102,9 +101,71 @@ Column value: \(V = \sum_{i=0}^{7} d_i \cdot 8^i\) with \(d_i \in \{0…7\}\), s
 
 **Important:** `#` is reserved for comments and `@block` markers — it is **not** a hole glyph (v6 uses `%` for level 6).
 
+**v7 (ASCII hexadecimal, 1 byte each)**
+
+| Level | Glyph | Level | Glyph |
+|------:|:-----:|------:|:-----:|
+| 0 | `.` | 8 | `b` |
+| 1 | `,` | 9 | `c` |
+| 2 | `:` | 10 | `d` |
+| 3 | `+` | 11 | `e` |
+| 4 | `=` | 12 | `f` |
+| 5 | `x` | 13 | `g` |
+| 6 | `%` | 14 | `@` |
+| 7 | `a` | 15 | `*` full |
+
+Feed / sprocket: `o`. Column value \(V = \sum_{i=0}^{7} d_i \cdot 16^i\) with \(d_i \in \{0…15\}\) → \(16^8 = 2^{32}\) states.
+
 ---
 
-## v6 packing (default write, densest)
+## v8 packing — experimental maximum density
+
+Each channel is a full byte (0…255). Eight channels → \(256^8 = 2^{64}\) states → **exactly 8 payload bytes per column**.
+
+**v8 base-256 — experimental maximum density.** Not the default write format (that is **v7 hexadecimal**). At 256 levels, holes are continuous **grayscale** intensities rather than a few discrete punch depths. The strip still uses the classic 8-channel + feed layout; on-disk tokens use **two hex digits per channel** because a single ASCII glyph cannot encode 256 values.
+
+Example token: `a3f201o00ffc80011` (ch1=0xA3 … ch3=0x01, feed `o`, ch4…ch8).
+
+Headers:
+
+```
+# packing: b256
+# packing-base: 18446744073709551616
+# channel-states: 256
+# columns: base256
+# punched-size: <binary byte count before pack>
+# base256-columns: <column count>
+# pack-chunk: 0
+# glyphs: hex-pairs 00-ff per channel, o=sprocket (256 levels=grayscale byte)
+# note: base-256 — each channel is a grayscale byte (0–255); 8 bytes/column
+```
+
+Streams and archives use `packing=b256`. Density: **⌈N/8⌉** columns for N punched bytes.
+
+---
+
+## v7 packing
+
+Every four consecutive payload bytes become one column (big-endian quad → `UInt32`). Short remainder high-aligns (low bytes zero). Packing is **O(n)**.
+
+Headers:
+
+```
+# packing: hex
+# packing-base: 4294967296
+# channel-states: 16
+# columns: hexadecimal
+# punched-size: <binary byte count before pack>
+# hexadecimal-columns: <column count>
+# pack-chunk: 0
+# glyphs: *=15 @=14 g=13 … .=0 o=sprocket (16 depths)
+```
+
+Streams and folder archives use the same quad packing (`packing=hex`). Density: **exactly 32 bits per column** → **⌈N/4⌉** columns for N punched bytes.
+
+---
+
+## v6 packing
 
 Every three consecutive payload bytes become one column (big-endian triple → 24-bit value). Remainder 1 or 2 bytes pad into a final column (high-aligned). Packing is **O(n)** with no big-integer conversion.
 
@@ -210,36 +271,26 @@ Sizes below are for the **`.Tape` text file** when the strip holds **raw** punch
 | **v4** | ~**10** B (ASCII 9-char + `\n`) | **~12.68** |
 | **v5** | ~**10** B (ASCII 9-char + `\n`) | **16** |
 | **v6** | ~**10** B (ASCII 9-char + `\n`) | **24** |
+| **v7** | ~**10** B (ASCII 9-char + `\n`) | **32** |
+| **v8** | ~**18** B (16 hex + `o` + `\n`) | **64** |
 
-v3–v6 share the same **per-column text cost**; denser packing needs **fewer columns** (v4 ~0.63×, v5 **0.5×**, v6 **~0.33×** vs binary).
+v3–v7 share ~10 B/col text cost; **v8** tokens are longer (~18 B) but still win on large N because of 8× fewer columns.
 
 ### Relative body size (raw payload, large N)
 
-| | vs binary columns | vs v3 file size (same payload) |
-|--|-------------------|--------------------------------|
-| **v3** | 1.0× columns | 100% |
-| **v4 full** | ~**0.63×** columns | ~**63%** of v3 |
-| **v4 block3** | ~**0.67×** columns | ~**67%** of v3 |
-| **v5 quat** | **0.5×** columns | ~**50%** of v3 |
-| **v6 oct** | **~0.33×** columns | ~**33%** of v3 |
-
-### Full-file rough sizes (header + `@block` + body)
-
-Illustrative estimates for **uncompressed payload** punched raw:
-
-| Payload | ≈ raw | ≈ v3 | ≈ v4 | ≈ v5 | ≈ v6 | v6 / v3 |
-|---------|-------|------|------|------|------|---------|
-| Short (~19 B) | 19 B | ~0.7 KB | ~0.5 KB | ~0.4 KB | ~0.3 KB | ~40% |
-| 1 KiB text | 1 KiB | ~12 KB | ~7.5 KB | ~6 KB | ~4 KB | ~33% |
-| 64 KiB mixed | 64 KiB | ~0.7 MB | ~0.44 MB | ~0.35 MB | ~0.23 MB | ~33% |
+| | vs binary columns | vs v3 body (large N) |
+|--|-------------------|----------------------|
+| **v3** | 1.0× | 100% |
+| **v5** | 0.5× | ~50% |
+| **v6** | ~0.33× | ~33% |
+| **v7** | 0.25× | ~25% |
+| **v8** | **0.125×** | **~20–25%** (longer tokens offset some savings) |
 
 **Rules of thumb**
 
-1. **v1 → v3**: ASCII + drop notes/preview → often **~65–70% smaller**.
-2. **v3 → v4**: fewer columns via ternary → often **~35–40% smaller** than v3.
-3. **v3 → v5**: half the columns → often **~half** the v3 body.
-4. **v3 → v6**: one-third the columns → often **~one-third** the v3 body.
-5. **With Auto compression**, payload columns shrink first; format savings still apply on the remaining punched length.
+1. **v1 → v3**: often **~65–70% smaller**.
+2. **v3 → v8**: about **⅛** the columns; body often **~⅕–¼** of v3 despite longer tokens.
+3. **With Auto compression**, format savings apply to the remaining punched length.
 
 ---
 
@@ -247,39 +298,36 @@ Illustrative estimates for **uncompressed payload** punched raw:
 
 | Choose | When |
 |--------|------|
-| **v6 octal** | **Default**; densest (24 bits/col); eight calibrated depths |
-| **v5 quaternary** | Four-state channels (16 bits/col) |
-| **v4 ternary** | Three-state channels + base-6561 (~12.68 bits/col) |
-| **v3 ASCII** | Binary 1:1 columns; simple ASCII `* . o` |
-| **v2 visual** | Unicode “paper” look in the file, without annotation clutter |
-| **v1 annotated** | Human debugging; character/hex notes + terminal-paper preview footer |
+| **v7 hexadecimal** | **Default**; 16 discrete depths (32 bits/col); multilevel-punch look |
+| **v8 base-256 — experimental maximum density** | Densest (64 bits/col); grayscale “byte grid” aesthetic |
+| **v6 octal** | Eight depths (24 bits/col) |
+| **v5 quaternary** | Four depths (16 bits/col) |
+| **v4 ternary** | Three depths (~12.68 bits/col) |
+| **v3 ASCII** | Binary 1:1 columns |
+| **v2 / v1** | Unicode visual / annotated debugging |
 
 ### Note on “7-bit-safe”
 
-v3–v6 make the **punched column lines** pure ASCII. That does **not** guarantee the whole file is 7-bit: `# name:`, `# note:`, and archive `# @file path="…"` values are still UTF-8 and may include non-ASCII characters from real filenames.
+v3–v8 make the **punched column lines** pure ASCII. Header names and archive paths may still be UTF-8.
 
-In the app: **Format** picker (**v6 octal** / **v5 quaternary** / **v4 ternary** / **v3 ASCII** / **v2 visual** / **v1 annotated**).
+In the app: **Format** picker lists **v1…v8** in version order (default write is **v7 hexadecimal**; v8 is experimental maximum density).
 
 ### Suggested filenames
-
-Encode / Save panels suggest a name that includes the write dialect:
 
 ```
 <source-stem>-v<N>.Tape
 ```
 
-Examples: `letter-v6.Tape`, `backup-v3.Tape`, `MyFolder-v4.Tape`.
-
-A trailing `-v1`…`-v6` on the stem is replaced when re-saving under a different format. The on-disk `# PaperTape File vN` header is authoritative for readers; the filename suffix is a convenience only.
+Examples: `letter-v8.Tape`, `backup-v3.Tape`. A trailing `-v1`…`-v8` is replaced on re-save.
 
 ---
 
 ## Minimal skeletons
 
-### v6 (default)
+### v7 (default)
 
 ```
-# PaperTape File v6
+# PaperTape File v7
 # name: example.txt
 # size: N
 # punched-size: M
@@ -287,21 +335,53 @@ A trailing `-v1`…`-v6` on the stem is replaced when re-saving under a differen
 # transfer: identity
 # block-size: 64
 # integrity: crc32+xor+sum8
-# columns: octal
+# columns: hexadecimal
 # channels: 8
 # bit-order: channel-1-lsb
 # layout: ch1 ch2 ch3 feed ch4 ch5 ch6 ch7 ch8
-# glyphs: *=7 %=6 x=5 ==4 +=3 :=2 ,=1 .=0 o=sprocket
-# packing: oct
-# packing-base: 16777216
-# channel-states: 8
-# octal-columns: K
+# glyphs: .,:+=x%abcdefg@*  o=sprocket (16 depths)
+# packing: hex
+# packing-base: 4294967296
+# channel-states: 16
+# hexadecimal-columns: K
 # pack-chunk: 0
 # ---
 # @block 0 off=0 len=… crc32=… xor=… sum8=…
-.,:o+=x%*
+.:+o=xa%*
 …
 ```
+
+### v8 base-256 — experimental maximum density
+
+```
+# PaperTape File v8
+# name: example.txt
+# size: N
+# punched-size: M
+# compression: none
+# transfer: identity
+# block-size: 64
+# integrity: crc32+xor+sum8
+# columns: base256
+# channels: 8
+# bit-order: channel-1-lsb
+# layout: ch1 ch2 ch3 feed ch4 ch5 ch6 ch7 ch8
+# glyphs: hex-pairs 00-ff per channel, o=sprocket (256 levels=grayscale byte)
+# packing: b256
+# packing-base: 18446744073709551616
+# channel-states: 256
+# base256-columns: K
+# pack-chunk: 0
+# note: base-256 — each channel is a grayscale byte (0–255); 8 bytes/column
+# ---
+# @block 0 off=0 len=… crc32=… xor=… sum8=…
+a3f201o00ffc80011
+…
+```
+
+### v6
+
+Same idea with `v6`, `# columns: octal`, packing `oct`, glyphs `* % x = + : , . o`.
 
 ### v5
 
@@ -327,9 +407,9 @@ Same as v2 with `v1`, `# columns: annotated`, annotated column lines, and a trai
 
 ## Related
 
-- [README.md](README.md) — features, usage, build (app **1.10.3**)
+- [README.md](README.md) — features, usage, build (app **1.12.1**)
 - [CHANGELOG.md](CHANGELOG.md) — release history
-- `Examples/*.Tape` — sample files (`message-v6.Tape`, `message-v5.Tape`, etc.)
+- `Examples/*.Tape` — sample files (`message-v8.Tape`, `message-v7.Tape`, etc.)
 
 
 Suggested filename: `payload-v5.Tape`.

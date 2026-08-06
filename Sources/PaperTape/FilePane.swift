@@ -100,7 +100,7 @@ struct FilePane: View {
                 .foregroundStyle(AppTheme.accent)
 
             Text(
-                "Files and folders become punched columns (v1–v6 formats). Large files stream to disk; folders pack as multi-file archives. "
+                "Files and folders become punched columns (v1–v8 formats). Large files stream to disk; folders pack as multi-file archives. "
                     + "Suggested save names include the format version (e.g. report-v4.Tape)."
             )
             .font(.callout)

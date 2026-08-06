@@ -158,14 +158,22 @@ struct TapeStripView: View {
                                 isSprocket: true
                             )
                         case .channel(let n):
-                            let level = col.channelLevel(n - 1)
-                            Self.drawHole(
-                                context: context,
-                                center: CGPoint(x: x, y: y),
-                                radius: 3.2,
-                                level: level,
-                                isSprocket: false
-                            )
+                            if col.isBase256 {
+                                Self.drawGrayscaleHole(
+                                    context: context,
+                                    center: CGPoint(x: x, y: y),
+                                    radius: 3.2,
+                                    intensity: col.base256Bytes[n - 1]
+                                )
+                            } else {
+                                Self.drawHole(
+                                    context: context,
+                                    center: CGPoint(x: x, y: y),
+                                    radius: 3.2,
+                                    level: col.channelLevel(n - 1),
+                                    isSprocket: false
+                                )
+                            }
                         }
                     }
 
@@ -195,8 +203,40 @@ struct TapeStripView: View {
         Color(red: 0.93, green: 0.88, blue: 0.74)
     }
 
-    /// Draw a channel mark with progressive fill for multi-state levels 0…7.
-    /// Same 8-channel strip layout for all formats; depth encodes packing state.
+    /// Continuous grayscale hole for v8 base-256 (intensity = channel byte 0…255).
+    private static func drawGrayscaleHole(
+        context: GraphicsContext,
+        center: CGPoint,
+        radius: CGFloat,
+        intensity: UInt8
+    ) {
+        let rect = CGRect(
+            x: center.x - radius,
+            y: center.y - radius,
+            width: radius * 2,
+            height: radius * 2
+        )
+        let t = CGFloat(intensity) / 255.0
+        context.stroke(
+            Path(ellipseIn: rect.insetBy(dx: 0.5, dy: 0.5)),
+            with: .color(Color.black.opacity(0.10 + 0.12 * t)),
+            lineWidth: 0.6
+        )
+        guard intensity > 0 else { return }
+        let fillR = radius * (0.35 + 0.65 * t)
+        let fillRect = CGRect(
+            x: center.x - fillR,
+            y: center.y - fillR,
+            width: fillR * 2,
+            height: fillR * 2
+        )
+        context.fill(
+            Path(ellipseIn: fillRect),
+            with: .color(Color.black.opacity(0.12 + 0.66 * t))
+        )
+    }
+
+    /// Draw a discrete multilevel hole (v1–v7). Levels 0…7.
     private static func drawHole(
         context: GraphicsContext,
         center: CGPoint,
@@ -218,7 +258,7 @@ struct TapeStripView: View {
             )
             return
         }
-        // Map 1…7 → fill radius fraction (calibrated octal / intermediate depths).
+        // Map 1…7 → fill radius fraction (calibrated multilevel depths).
         let fractions: [CGFloat] = [0, 0.28, 0.38, 0.48, 0.58, 0.68, 0.80, 1.0]
         let idx = min(Int(level), fractions.count - 1)
         let frac = fractions[idx]

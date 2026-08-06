@@ -6,11 +6,13 @@ A macOS app that encodes data as **classic 8-channel punched paper tape** — bo
 
 - **Encode text** — type or paste; live strip updates as you go
 - **Visual tape** — warm teleprinter paper with data holes and a sprocket (feed) track (binary full/blank; multi-state v4–v6 draw progressive hole depths)
-- **`.Tape` files** — UTF-8 visual column format that round-trips losslessly (**v1–v6** write dialects)
-- **v6 octal (default)** — densest packing (**24 bits/column**, 3 bytes/col); ASCII glyphs `.` `,` `:` `+` `=` `x` `%` `*` `o`
+- **`.Tape` files** — UTF-8 visual column format that round-trips losslessly (**v1–v8** write dialects)
+- **v7 hexadecimal (default)** — **32 bits/column** (4 bytes/col); 16 hole depths + feed `o`
+- **v8 base-256 — experimental maximum density** — **64 bits/column** (8 bytes/col); each channel is a grayscale byte; tokens use hex pairs + `o`
+- **v6 octal** — **24 bits/column** (3 bytes/col); glyphs `.` `,` `:` `+` `=` `x` `%` `*` `o`
 - **v5 quaternary** — **16 bits/column** (2 bytes/col); glyphs `.` `+` `=` `*` `o`
 - **v4 ternary** — ~12.68 bits/column via base-6561; glyphs `.` `+` `*` `o`
-- **Versioned save names** — suggested filenames include the format: `notes-v6.Tape`, `Project-v3.Tape`, …
+- **Versioned save names** — suggested filenames include the format: `notes-v7.Tape`, `Project-v3.Tape`, …
 - **Auto compression** — trials **LZFSE, Zlib, LZ4, and LZMA**; keeps the smallest worthwhile result (or raw)
 - **Base85 (Ascii85)** — optional transfer encoding after compression for printable strip payloads (~+25% size)
 - **Integrity blocks** — CRC-32 + XOR + SUM8 every 64 columns (`# @block` markers)
@@ -51,17 +53,19 @@ Glyphs in the digital format:
 | **v4** | 3 | `.` `+` `*` + `o` feed |
 | **v5** | 4 | `.` `+` `=` `*` + `o` feed |
 | **v6** | 8 | `.` `,` `:` `+` `=` `x` `%` `*` + `o` feed |
+| **v7** | 16 | `.` `,` `:` `+` `=` `x` `%` `a`…`g` `@` `*` + `o` feed |
+| **v8** | 256 | hex pairs `00`–`ff` per channel + `o` feed (grayscale) |
 
 ## Pipeline
 
 ```
-original bytes → [compress] → [Base85] → [dense pack if v4/v5/v6] → column tokens → .Tape text
+original bytes → [compress] → [Base85] → [dense pack if v4–v8] → column tokens → .Tape text
 ```
 
 Inverse on restore / export:
 
 ```
-.Tape columns → [dense unpack if v4/v5/v6] → [Base85 decode] → [decompress] → original bytes
+.Tape columns → [dense unpack if v4–v8] → [Base85 decode] → [decompress] → original bytes
 ```
 
 Compression and Base85 only change which **payload** bytes sit on the strip. Format chooses packing and column glyphs. The in-app strip and PNG keep a classic paper look (multi-state formats draw multiple hole sizes).
@@ -70,7 +74,7 @@ Compression and Base85 only change which **payload** bytes sit on the strip. For
 
 UTF-8 text. The body (column lines + `# @block` markers) is the source of truth for decode. A terminal-paper preview footer is written only for **v1** (comments only; never parsed as columns).
 
-**Dialect details and size comparisons:** see **[FORMAT.md](FORMAT.md)** (v1–v6, glyphs, packing, approximate reductions).
+**Dialect details and size comparisons:** see **[FORMAT.md](FORMAT.md)** (v1–v8, glyphs, packing, approximate reductions).
 
 ### Format versions
 
@@ -81,15 +85,16 @@ UTF-8 text. The body (column lines + `# @block` markers) is the source of truth 
 | **v3** | ASCII `* . o` | 1 byte/col | No | No | **v3 ASCII** |
 | **v4** | ASCII `* + . o` | base-6561 (~12.68 bits/col) | No | No | **v4 ternary** |
 | **v5** | ASCII `* = + . o` | **2 bytes/col (16 bits)** | No | No | **v5 quaternary** |
-| **v6** (default write) | ASCII `* % x = + : , . o` | **3 bytes/col (24 bits)** | No | No | **v6 octal** |
+| **v6** | ASCII multilevel + `o` | **3 bytes/col (24 bits)** | No | No | **v6 octal** |
+| **v7** (default write) | 16 ASCII depths + `o` | **4 bytes/col (32 bits)** | No | No | **v7 hexadecimal** |
+| **v8** | hex pairs `00`–`ff` + `o` | **8 bytes/col (64 bits)** | No | No | **v8 base-256 — experimental maximum density** |
 
-Example v6 token: `.,:o+=x%*` — eight depths per channel, feed `o`.
+Example v8 token: `a3f201o00ffc80011` — two hex digits per channel (full byte), feed `o`.  
+Visually the strip is eight **grayscale** holes per column (less classic “punch depth”, intentionally more byte-grid).
 
-**v6** is densest: \(8^8 = 16\,777\,216 = 2^{24}\) states/column → exactly **three payload bytes per column** (⌈N/3⌉ columns). Packing is triple-wise and **O(n)**.
-
-**v5** quaternary: \(4^8 = 65\,536 = 2^{16}\) → **two bytes per column** (⌈N/2⌉).
-
-**v4** ternary: \(3^8 = 6561\) states (~12.68 bits/col). Modest payloads use whole-integer base-6561; larger use 4 KiB chunks; streams use block3 (3 B → 2 col).
+**v7** (default): \(16^8 = 2^{32}\) → four bytes/col — practical multilevel density.  
+**v8 base-256 — experimental maximum density**: \(256^8 = 2^{64}\) → **eight payload bytes per column** (⌈N/8⌉).  
+**v6** octal: three bytes/col. **v5** quat: two bytes/col. **v4** ternary: ~12.68 bits/col.
 
 All versions share integrity markers, compression/Base85, streaming, and archives. Readers accept any known version. Only **writing** is controlled by the **Format** picker.
 
@@ -147,13 +152,11 @@ See `Examples/` in the repo.
 | `# transfer: identity\|ascii85` | Transfer encoding after compression |
 | `# block-size:` | Columns per integrity block (default **64**) |
 | `# integrity: crc32+xor+sum8` | Integrity scheme |
-| `# columns: annotated\|compact\|ascii\|ternary\|quaternary\|octal` | Write dialect body style |
-| `# packing: full\|block3\|quat\|oct` | Dense pack mode (v4 full/block3; v5 `quat`; v6 `oct`) |
-| `# packing-base:` | States per column: **6561** (v4), **65536** (v5), **16777216** (v6) |
-| `# channel-states:` | **3** (v4), **4** (v5), **8** (v6); omitted for binary v1–v3 |
-| `# ternary-columns:` | v4: number of ternary columns |
-| `# quaternary-columns:` | v5: number of quaternary columns |
-| `# octal-columns:` | v6: number of octal columns |
+| `# columns: annotated\|compact\|ascii\|ternary\|quaternary\|octal\|hexadecimal\|base256` | Write dialect body style |
+| `# packing: full\|block3\|quat\|oct\|hex\|b256` | Dense pack mode |
+| `# packing-base:` | States per column (v4…v8: 6561 … \(2^{64}\)) |
+| `# channel-states:` | **3** / **4** / **8** / **16** / **256** for v4…v8 |
+| `# ternary-columns:` / `# quaternary-columns:` / `# octal-columns:` / `# hexadecimal-columns:` / `# base256-columns:` | Dense column counts |
 | `# pack-chunk:` | v4 full pack: 0 = whole payload; 4096 = fixed chunks (linear time) |
 | `# mode: blob\|stream\|archive` | Container kind (omitted ⇒ blob) |
 | `# stream: 1` | Large-file / archive streaming write |
@@ -175,6 +178,8 @@ Integrity is CRC-32 + XOR + SUM8 over each block’s **integrity bytes** (not th
 | **v4** ternary | 2-byte little-endian column value |
 | **v5** quaternary | 2-byte little-endian column value |
 | **v6** octal | 3-byte little-endian column value (24-bit) |
+| **v7** hexadecimal | 4-byte little-endian column value (32-bit) |
+| **v8** base-256 | 8 channel bytes (ch1…ch8 order) |
 
 On open, PaperTape verifies each block and shows **Integrity OK** or **FAIL** (which block(s)) on the Tape tab. Damaged transmission can be localized without re-checking the entire tape as one unit.
 
@@ -263,8 +268,8 @@ Requires macOS 13+ and Xcode command-line tools / Swift 5.9+.
 1. **Encode** — type text; columns appear on the strip as you type  
 2. **Compress** — **Auto** (default) or **Off** (payload only)  
 3. **Base85** — optional printable transfer encoding after compression  
-4. **Format** — **v6 octal** (default, densest), **v5 quaternary**, **v4 ternary**, **v3 ASCII**, **v2 visual**, or **v1 annotated** (see [FORMAT.md](FORMAT.md))  
-5. **Save .Tape…** — write the digital visual representation (suggested name includes `-vN`, e.g. `message-v6.Tape`)  
+4. **Format** — **v7 hexadecimal** (default), **v8 base-256 — experimental maximum density**, …, or **v1 annotated** (see [FORMAT.md](FORMAT.md))  
+5. **Save .Tape…** — write the digital visual representation (suggested name includes `-vN`, e.g. `message-v7.Tape`)  
 6. **Drop** a file or folder onto the window — save sheet, then punch (**progress** + **Cancel** in the footer)  
 7. **Files** — choose file/folder to punch (also **Cancel** while working), open a `.Tape`, or restore/extract  
 8. **Tape tab** — strip, integrity banner, folder-archive / partial-preview notes  
@@ -277,11 +282,11 @@ Requires macOS 13+ and Xcode command-line tools / Swift 5.9+.
 - **About** tab → **Run self-test**, or  
 - `PaperTape --self-test` (exits non-zero on failure)
 
-Covers text/unicode round-trips, compression codecs, Base85, integrity blocks, ternary/quaternary/octal packing (v4–v6), and folder archive pack/extract.
+Covers text/unicode round-trips, compression codecs, Base85, integrity blocks, dense packing (v4–v8), and folder archive pack/extract.
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for release history. Format dialects: [FORMAT.md](FORMAT.md).
+See [CHANGELOG.md](CHANGELOG.md) for release history. Format dialects: [FORMAT.md](FORMAT.md). Security posture (what this is / is not): [SECURITY.md](SECURITY.md).
 
 ## License
 

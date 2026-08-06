@@ -5,6 +5,59 @@ All notable changes to **PaperTape** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to follow [Semantic Versioning](https://semver.org/).
 
+## [1.12.1] - 2026-08-05
+
+### Changed
+
+- **Default write format** is again **v7 hexadecimal** (practical multilevel density)
+- **v8 base-256** labeled **experimental maximum density** in the Format picker and docs
+- Format picker lists versions in order **v1…v8**; default write remains **v7**
+
+## [1.12.0] - 2026-08-04
+
+### Added
+
+- **`.Tape` format v8 (base-256)**: each channel stores a full byte (grayscale intensity 0…255)
+- **64 bits/column** packing: \(256^8 = 2^{64}\) → exactly **8 bytes per column** (O(n), densest)
+- On-disk tokens use **hex pairs + feed** (17 chars), e.g. `a3f201o00ffc80011` — single ASCII glyphs cannot encode 256 depths
+- Strip UI draws true **grayscale holes** from channel bytes (plausibly less “paper tape”, intentionally more “byte grid”)
+- Headers: `# columns: base256`, `# packing: b256`, `# channel-states: 256`, `# base256-columns:`
+- Format picker: **v8 base-256** (was default write in 1.12.0); stream/archive/integrity supported
+- Example: `Examples/message-v8.Tape`
+
+### Density (raw payload columns)
+
+| Format | bits/col | ≈ columns for N bytes |
+|--------|----------|------------------------|
+| v3 binary | 8 | N |
+| v5 quaternary | 16 | ⌈N/2⌉ |
+| v6 octal | 24 | ⌈N/3⌉ |
+| v7 hexadecimal | 32 | ⌈N/4⌉ |
+| **v8 base-256** | **64** | **⌈N/8⌉** |
+
+## [1.11.0] - 2026-08-04
+
+### Added
+
+- **`.Tape` format v7 (hexadecimal)**: sixteen calibrated punch depths per channel  
+  (`. , : + = x % a b c d e f g @ *`, feed `o`)
+- **32 bits/column** packing: \(16^8 = 2^{32}\) → exactly **4 bytes per column** (O(n), densest)
+- Format picker: **v7 hexadecimal** (default write) / v6 … v1
+- Headers: `# columns: hexadecimal`, `# packing: hex`, `# packing-base: 4294967296`, `# channel-states: 16`, `# hexadecimal-columns:`
+- Stream/archive support; strip/terminal art map 16 depths; integrity over LE 4-byte column values
+- Suggested save names: `name-v7.Tape`
+- Example: `Examples/message-v7.Tape`
+
+### Density (raw payload columns)
+
+| Format | bits/col | ≈ columns for N bytes |
+|--------|----------|------------------------|
+| v3 binary | 8 | N |
+| v4 ternary | ~12.68 | ~0.63 N |
+| v5 quaternary | 16 | ⌈N/2⌉ |
+| v6 octal | 24 | ⌈N/3⌉ |
+| **v7 hexadecimal** | **32** | **⌈N/4⌉** |
+
 ## [1.10.3] - 2026-08-04
 
 ### Fixed

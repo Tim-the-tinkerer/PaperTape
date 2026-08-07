@@ -8,10 +8,13 @@ extension TapeEngine {
     static let streamingByteThreshold = 4 * 1024 * 1024 // 4 MiB
     /// Max files walked in a folder encode (safety).
     static let archiveMaxFiles = 50_000
-    /// Skip common junk when packing folders.
-    static let archiveSkipNamePrefixes = [".", ""]
+    /// Directory / file basenames skipped when packing folders (and their descendants).
+    /// Hidden items (`.build`, `.git`, …) are also skipped via `skipsHiddenFiles`.
+    /// **Not** skipped: app bundles and other packages (`.app`, `.framework`, …) —
+    /// those are part of the tree and must be fully archived.
     static let archiveSkipNames: Set<String> = [
-        ".DS_Store", "Thumbs.db", ".git", ".svn", ".hg", "node_modules",
+        ".DS_Store", "Thumbs.db", ".git", ".svn", ".hg",
+        "node_modules", ".build", "DerivedData", "__pycache__", ".swiftpm",
     ]
 }
 
@@ -1618,17 +1621,24 @@ extension TapeEngine {
     }
 
     /// Enumerate regular files under `root` with relative POSIX paths.
+    ///
+    /// Includes package contents (`.app`, `.framework`, …). Skips hidden items
+    /// (`.build`, `.git`, …) and known junk names in `archiveSkipNames`.
+    /// Symlinks are not followed. Empty directories are not stored (files only).
     static func listFolderFiles(root: URL) throws -> [ArchiveFileEntry] {
         let fm = FileManager.default
         let accessed = root.startAccessingSecurityScopedResource()
         defer { if accessed { root.stopAccessingSecurityScopedResource() } }
 
+        // Do **not** use `.skipsPackageDescendants` — that silently dropped entire
+        // app bundles (e.g. Cableform.app) while still packing the source tree.
         guard let enumerator = fm.enumerator(
             at: root,
             includingPropertiesForKeys: [
                 .isRegularFileKey, .fileSizeKey, .isDirectoryKey, .isSymbolicLinkKey,
+                .isPackageKey,
             ],
-            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+            options: [.skipsHiddenFiles]
         ) else {
             throw FormatError.io("Could not read folder \(root.lastPathComponent)")
         }
@@ -1640,19 +1650,24 @@ extension TapeEngine {
         for case let fileURL as URL in enumerator {
             let name = fileURL.lastPathComponent
             if archiveSkipNames.contains(name) {
-                if (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
-                    enumerator.skipDescendants()
-                }
+                // Skip this item and do not walk into it (dirs / packages / junk files).
+                enumerator.skipDescendants()
                 continue
             }
             let values = try fileURL.resourceValues(
-                forKeys: [.isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey, .isDirectoryKey]
+                forKeys: [
+                    .isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey,
+                    .isDirectoryKey, .isPackageKey,
+                ]
             )
             // Do not follow / pack symlink targets outside the chosen tree.
             if values.isSymbolicLink == true {
-                if values.isDirectory == true {
-                    enumerator.skipDescendants()
-                }
+                enumerator.skipDescendants()
+                continue
+            }
+            // Packages are directories on disk; keep enumerating into them so
+            // e.g. MyApp.app/Contents/MacOS/MyApp is archived as normal files.
+            if values.isDirectory == true {
                 continue
             }
             guard values.isRegularFile == true else { continue }
@@ -1810,6 +1825,7 @@ extension TapeEngine {
             headerLines.append("# note: base-256 archive — 8 bytes per column (grayscale channels; hex-pair tokens)")
         }
         headerLines.append("# note: each @file may compress independently; files ≥\(streamingByteThreshold / (1024 * 1024))MiB stream raw")
+        headerLines.append("# note: packages (.app) included; hidden (.build/.git) and node_modules skipped")
         headerLines.append("# ---")
         headerLines.append("")
         try handle.write(contentsOf: Data(headerLines.joined(separator: "\n").utf8))

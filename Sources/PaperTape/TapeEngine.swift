@@ -3725,14 +3725,35 @@ enum TapeEngine {
                 .appendingPathComponent("PaperTapeSelfTest-\(UUID().uuidString).Tape")
             defer { try? FileManager.default.removeItem(at: tapeURL) }
 
+            // Fake .app package — must be included (previously skipped via skipsPackageDescendants).
+            let appMacOS = tmpRoot
+                .appendingPathComponent("Demo.app/Contents/MacOS", isDirectory: true)
+            try FileManager.default.createDirectory(at: appMacOS, withIntermediateDirectories: true)
+            try Data("#!/bin/sh\necho demo\n".utf8)
+                .write(to: appMacOS.appendingPathComponent("Demo"))
+            try Data("stub".utf8)
+                .write(to: tmpRoot.appendingPathComponent("Demo.app/Contents/Info.plist"))
+            // Hidden build tree must still be skipped.
+            let buildDir = tmpRoot.appendingPathComponent(".build", isDirectory: true)
+            try FileManager.default.createDirectory(at: buildDir, withIntermediateDirectories: true)
+            try Data("junk".utf8).write(to: buildDir.appendingPathComponent("artifact.o"))
+
             let packed = try encodeFolder(
                 root: tmpRoot,
                 to: tapeURL,
                 compression: .auto,
                 transfer: .identity
             )
-            if packed.files != 2 {
-                failures.append("archive: expected 2 files, got \(packed.files)")
+            // a.txt, sub/b.txt, Demo.app/Contents/MacOS/Demo, Demo.app/Contents/Info.plist
+            if packed.files != 4 {
+                failures.append("archive: expected 4 files (incl. .app), got \(packed.files)")
+            }
+            let listed = try listFolderFiles(root: tmpRoot).map(\.relativePath)
+            if !listed.contains(where: { $0.contains("Demo.app/") }) {
+                failures.append("archive: .app package contents missing from listing")
+            }
+            if listed.contains(where: { $0.contains(".build") }) {
+                failures.append("archive: .build should be skipped")
             }
             if packed.compressedFiles < 1 {
                 failures.append("archive: expected at least one compressed member (got \(packed.compressedFiles))")
@@ -3763,13 +3784,20 @@ enum TapeEngine {
             }
 
             let extracted = try extractFolder(from: tapeURL, to: extractRoot)
-            if extracted.files != 2 {
-                failures.append("archive extract: expected 2 files, got \(extracted.files)")
+            if extracted.files != 4 {
+                failures.append("archive extract: expected 4 files, got \(extracted.files)")
             }
             let aOut = try String(contentsOf: extractRoot.appendingPathComponent("a.txt"), encoding: .utf8)
             let bOut = try String(contentsOf: extractRoot.appendingPathComponent("sub/b.txt"), encoding: .utf8)
             if aOut != a { failures.append("archive extract: a.txt mismatch") }
             if bOut != b { failures.append("archive extract: sub/b.txt mismatch") }
+            let appBin = extractRoot.appendingPathComponent("Demo.app/Contents/MacOS/Demo")
+            if !FileManager.default.fileExists(atPath: appBin.path) {
+                failures.append("archive extract: Demo.app binary missing")
+            }
+            if FileManager.default.fileExists(atPath: extractRoot.appendingPathComponent(".build/artifact.o").path) {
+                failures.append("archive extract: .build should not have been packed")
+            }
             // v4 archives should record pack-chunk on @file lines for durable unpack.
             if tapeText.contains("# columns: ternary") || tapeText.contains("# packing: full") {
                 if !tapeText.contains("pack-chunk=") {

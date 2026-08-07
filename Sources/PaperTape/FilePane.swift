@@ -120,7 +120,7 @@ struct FilePane: View {
                     .foregroundStyle(.secondary)
             }
 
-            Text("Compress / Base85 apply to each file under 4 MiB (including every file inside a folder pack). Larger files stream raw. Folders use mode: archive with one @file section per path.")
+            Text("Compress / Base85 apply to each file under 4 MiB (including every file inside a folder pack). Larger files stream raw. Folders use mode: archive with one @file section per path — including app bundles (.app). Hidden items (.build, .git, …) and node_modules are skipped.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 

@@ -5,6 +5,14 @@ All notable changes to **PaperTape** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to follow [Semantic Versioning](https://semver.org/).
 
+## [1.12.2] - 2026-08-07
+
+### Fixed
+
+- **Folder archives include app bundles** (and other packages): packing no longer used `skipsPackageDescendants`, which silently dropped entire `.app` trees (e.g. `Cableform.app`) while still packing sources
+- Still skipped: hidden items (`.build`, `.git`, …), plus `node_modules`, `DerivedData`, `__pycache__`, `.swiftpm`, desktop junk names
+- Self-test covers `.app` inclusion and `.build` exclusion
+
 ## [1.12.1] - 2026-08-05
 
 ### Changed

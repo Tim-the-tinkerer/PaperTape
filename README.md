@@ -239,7 +239,9 @@ Pack a directory into one `.Tape`:
 
 - Each member under 4 MiB can use **Compress / Base85** independently  
 - Members ≥ 4 MiB stream raw  
-- Symlinks and junk (`.DS_Store`, `.git`, `node_modules`, …) are skipped  
+- **App bundles and other packages** (`.app`, `.framework`, …) are included as normal nested files  
+- Skipped: hidden items (`.build`, `.git`, …), `node_modules`, `DerivedData`, `__pycache__`, `.swiftpm`, desktop junk (`.DS_Store`, …); symlinks are not followed  
+- Empty directories are not stored (files only)  
 - **Extract archive…** (Tape tab) or **Files → Restore** unpacks to a chosen folder  
 
 ## Build & run

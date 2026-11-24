@@ -29,6 +29,7 @@ extension TapeEngine {
         case hexadecimal = "hex"
         /// Base-256: every 8 bytes → 1 column (v8; exactly 64 bits/col).
         case base256 = "b256"
+        case base512 = "b512"
 
         var isTernary: Bool { self == .ternaryFull || self == .ternaryBlock3 }
         var isQuaternary: Bool { self == .quaternary }
@@ -41,6 +42,7 @@ extension TapeEngine {
         static func parse(_ raw: String) -> PackingMode {
             let key = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             switch key {
+            case "b512", "base512": return .base512
             case "full", "ternary", "ternary-full", "base6561", "6561":
                 return .ternaryFull
             case "block3", "block-3", "3+2", "stream":
@@ -407,6 +409,8 @@ extension TapeEngine {
             preconditionFailure("packTernary does not support .octal; call packOctal")
         case .hexadecimal:
             preconditionFailure("packTernary does not support .hexadecimal; call packHexadecimal")
+        case .base512:
+            preconditionFailure("packTernary does not support .base512")
         case .base256:
             preconditionFailure("packTernary does not support .base256; call packBase256")
         }
@@ -440,6 +444,8 @@ extension TapeEngine {
             preconditionFailure("unpackTernary does not support .octal; call unpackOctal")
         case .hexadecimal:
             preconditionFailure("unpackTernary does not support .hexadecimal; call unpackHexadecimal")
+        case .base512:
+            preconditionFailure("unpackTernary does not support .base512")
         case .base256:
             preconditionFailure("unpackTernary does not support .base256; call unpackBase256")
         }

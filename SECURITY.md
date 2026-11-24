@@ -6,7 +6,7 @@ This document states the security posture of **PaperTape** in plain terms. It is
 
 ## What PaperTape is
 
-PaperTape is a **macOS utility that represents data as classic 8-channel punched paper tape** — as an interactive strip and as a portable **`.Tape`** text file.
+PaperTape is a **macOS utility that represents data as punched paper tape with eight or nine data channels** — as an interactive strip and as a portable **`.Tape`** text file.
 
 From a data-handling standpoint it:
 
@@ -16,7 +16,7 @@ From a data-handling standpoint it:
 | **Decoding** | Reverses that mapping to restore the original bytes **losslessly** |
 | **Optional compression** | Shrinks the payload (LZFSE, Zlib, LZ4, LZMA, or none) before punching — for size, not secrecy |
 | **Optional Base85 (Ascii85)** | Transfer-encodes the payload into a more printable form — for strip aesthetics / text-friendliness, not secrecy |
-| **Dense packing (v4–v8)** | Packs more payload bits into each column — density, not cryptography |
+| **Packing (v4–v9)** | Packs more payload bits into each column — density, not cryptography |
 | **Integrity markers** | Writes CRC-32, XOR, and SUM8 over column blocks (`# @block`) so accidental corruption is easier to notice |
 | **Archives** | Packs a folder tree into one `.Tape` (`mode: archive`) and can extract it again |
 | **Local files** | Reads and writes files you choose (or drop) on your Mac; no network protocol of its own |
@@ -84,7 +84,7 @@ Do not put credentials, keys, or private documents into PaperTape unless you acc
 
 1. **Classify the payload first.** Public or already encrypted → fine to punch. Secrets → encrypt with a dedicated tool, then optionally punch the ciphertext if you want the aesthetic.
 2. **Use OS permissions.** `.Tape` files on disk are protected only by filesystem ACLs, disk encryption (FileVault), and who you share with.
-3. **Do not treat dense formats (v7/v8) as “harder to read.”** Density reduces column count; it does not add secrecy.
+3. **Do not treat packed formats (including v7/v8/v9) as “harder to read.”** Packing can reduce column count; it does not add secrecy. v9 Base512 is a reversible nine-bit representation, not encryption.
 4. **Verify untrusted extracts** the same way you would any download (hash from a trusted channel, antivirus policy, don’t run unknown binaries).
 5. **Report real security bugs** (e.g. path traversal on archive extract, unexpected network behavior, memory safety issues) as product defects — not as “crypto breaks,” since there is no crypto product surface.
 

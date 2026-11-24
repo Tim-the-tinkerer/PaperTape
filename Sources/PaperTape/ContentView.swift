@@ -635,7 +635,7 @@ struct ContentView: View {
                         .foregroundStyle(.tertiary)
                 }
                 if !document.isEmpty {
-                    Text("· \(document.columns.count) cols")
+                    Text("· \(visualColumnCount) cols")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
@@ -655,10 +655,10 @@ struct ContentView: View {
 
             // Visual strip — may shrink; terminal preview keeps reserved height below.
             HStack(alignment: .top, spacing: 8) {
-                TapeChannelLegend()
+                TapeChannelLegend(nineChannels: visualDocument.packing == .base512)
                     .padding(.leading, 8)
                 TapeStripView(
-                    document: document,
+                    document: visualDocument,
                     columnWidth: columnWidth,
                     showLegend: true,
                     maxDisplayColumns: 1_024
@@ -687,7 +687,9 @@ struct ContentView: View {
                 Text("Terminal paper")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
-                if document.packing.isBase256 {
+                if visualDocument.packing == .base512 {
+                    Text("v9 nine-channel binary (Base512)")
+                } else if document.packing.isBase256 {
                     Text("v8 base-256 — experimental maximum density")
                 } else if document.packing.isHexadecimal {
                     Text("v7 hexadecimal")
@@ -702,8 +704,8 @@ struct ContentView: View {
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
-                if document.columns.count > 64 {
-                    Text("(first 64 of \(document.columns.count) columns)")
+                if visualColumnCount > 64 {
+                    Text("(first 64 of \(visualColumnCount) columns)")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
@@ -732,11 +734,35 @@ struct ContentView: View {
         .zIndex(5)
     }
 
+    private var previewsNewBase512Tape: Bool {
+        tapeFileFormat == .v9 && document.packing == .binary && !document.isPartialPreview
+            && !document.isArchive && (mode == .encode || sourceURL == nil)
+    }
+
+    private var visualColumnCount: Int {
+        let count = document.columns.count
+        return previewsNewBase512Tape ? count - count / 9 : count
+    }
+
+    private var visualDocument: TapeEngine.TapeDocument {
+        guard previewsNewBase512Tape else {
+            return document
+        }
+        var preview = document
+        let byteLimit = 1_152 // Exactly 1,024 complete nine-bit columns.
+        let prefix = Data(document.columns.prefix(byteLimit).map(\.byte))
+        preview.columns = TapeEngine.base512Columns(from: prefix)
+        preview.packing = .base512
+        preview.isPartialPreview = document.columns.count > byteLimit
+        preview.packedByteCount = prefix.count
+        return preview
+    }
+
     private var terminalPreviewText: String {
         if document.isEmpty {
             return "(empty tape — type or open data to generate terminal paper art)"
         }
-        return TapeEngine.terminalPaper(for: document, maxColumns: 64)
+        return TapeEngine.terminalPaper(for: visualDocument, maxColumns: 64)
     }
 
     private var aboutPane: some View {
@@ -777,11 +803,11 @@ struct ContentView: View {
                         Text("Extension: .\(TapeEngine.fileExtension)  ·  App \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?")")
                         Text("Type: UTF-8 text with a PaperTape header and one visual column token per line.")
                         Text("Round-trips any binary payload losslessly through the punched pattern.")
-                        Text("Pipeline: original → [compress] → [Base85] → [dense pack if v4–v8] → columns. Format picks packing and glyphs (v1–v8).")
+                        Text("Pipeline: original → [compress] → [Base85] → [pack according to format] → columns. Format picks packing and glyphs (v1–v9).")
                         Text("Auto compression trials LZFSE/Zlib/LZ4/LZMA. Short messages: any smaller result; large: ≥5% and ≥16 bytes.")
                         Text("Base85 (Ascii85) is optional after compression — printable payload on the strip. It expands (~+25%); use Compress to shrink.")
-                        Text("Header: # columns: …|ternary|quaternary|octal|hexadecimal|base256 · # packing: full|block3|quat|oct|hex|b256")
-                        Text("v1…v3 binary · v4 (~12.68) · v5 (16) · v6 (24) · v7 hex (32, default) · v8 base-256 — experimental maximum density (64).")
+                        Text("Header: # columns: …|ternary|quaternary|octal|hexadecimal|base256|base512 · # packing: full|block3|quat|oct|hex|b256|b512")
+                        Text("v1…v3 binary · v4 (~12.68) · v5 (16) · v6 (24) · v7 hex (32, default) · v8 base-256 — experimental maximum density (64) · v9 nine-channel binary (9).")
                         Text("Suggested save names include the version: notes-v7.Tape, Project-v3.Tape, …")
                         Text("Each block: # @block N … crc32/xor/sum8. Folders: # @file path=\"…\" size=… compression=… packing=… per member.")
                         Text("Large files (≥4 MiB) stream raw; folder members under 4 MiB use Compress/Base85 per file.")
@@ -1085,11 +1111,11 @@ struct ContentView: View {
     }
 
     private func copyTerminalArt() {
-        let art = TapeEngine.terminalPaper(for: document, maxColumns: 256)
+        let art = TapeEngine.terminalPaper(for: visualDocument, maxColumns: 256)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(art, forType: .string)
         copied = true
-        statusMessage = document.columns.count > 256
+        statusMessage = visualColumnCount > 256
             ? "Copied terminal art (first 256 columns)."
             : "Copied terminal paper art."
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
@@ -1189,7 +1215,7 @@ struct ContentView: View {
     }
 
     private func exportPNG() {
-        guard let png = TapeImageExporter.renderPNG(document: document) else {
+        guard let png = TapeImageExporter.renderPNG(document: visualDocument) else {
             statusMessage = "PNG export failed."
             return
         }

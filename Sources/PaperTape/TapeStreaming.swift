@@ -57,6 +57,7 @@ final class TapeStreamWriter {
     private let useOctal: Bool
     private let useHexadecimal: Bool
     private let useBase256: Bool
+    private var base512Writer: Base512BlockWriter?
     private let packing: TapeEngine.PackingMode
     private let style: TapeEngine.GlyphStyle
 
@@ -101,7 +102,10 @@ final class TapeStreamWriter {
         self.useOctal = fileFormat.usesOctalPacking
         self.useHexadecimal = fileFormat.usesHexadecimalPacking
         self.useBase256 = fileFormat.usesBase256Packing
-        if useBase256 {
+        if fileFormat == .v9 {
+            self.packing = .base512
+            self.base512Writer = Base512BlockWriter(handle: handle, blockSize: self.blockSize)
+        } else if useBase256 {
             self.packing = .base256
         } else if useHexadecimal {
             self.packing = .hexadecimal
@@ -130,13 +134,15 @@ final class TapeStreamWriter {
             "# block-size: \(self.blockSize)",
             "# integrity: crc32+xor+sum8",
             "# columns: \(fileFormat.columnsHeaderValue)",
-            "# channels: \(TapeEngine.channelCount)",
+            "# channels: \(fileFormat == .v9 ? 9 : TapeEngine.channelCount)",
             "# bit-order: channel-1-lsb",
-            "# layout: ch1 ch2 ch3 feed ch4 ch5 ch6 ch7 ch8",
+            "# layout: ch1 ch2 ch3 feed ch4 ch5 ch6 ch7 ch8\(fileFormat == .v9 ? " ch9" : "")",
             "# glyphs: \(glyphStyle.headerDescription)",
             "# stream: 1",
         ]
-        if useTernary {
+        if fileFormat == .v9 {
+            headerLines += ["# packing: b512", "# packing-base: 512", "# channel-states: 2"]
+        } else if useTernary {
             headerLines.append("# packing: \(packing.rawValue)")
             headerLines.append("# packing-base: \(TapeEngine.ternaryBase)")
             headerLines.append("# channel-states: 3")
@@ -198,6 +204,10 @@ final class TapeStreamWriter {
         }
         guard !data.isEmpty else { return }
         totalBinaryBytes += Int64(data.count)
+        if let base512Writer {
+            try base512Writer.append(data, cancel: cancel)
+            return
+        }
 
         if useTernary {
             // Keep 0–2 leftover bytes so block3 groups stay aligned.
@@ -302,7 +312,14 @@ final class TapeStreamWriter {
     @discardableResult
     func finish() throws -> Int64 {
         guard !closed else { return totalColumns }
-        if useTernary {
+        if let base512Writer {
+            if let originalSize, originalSize != totalBinaryBytes {
+                throw TapeEngine.base512Error("input size changed while encoding")
+            }
+            try base512Writer.finish()
+            totalColumns = Int64(base512Writer.columns)
+            blockIndex = base512Writer.blocks
+        } else if useTernary {
             if !blockBuffer.isEmpty {
                 denseValues.append(contentsOf: TapeEngine.packTernaryBlock3(blockBuffer).map { UInt32($0) })
                 blockBuffer.removeAll()
@@ -512,6 +529,7 @@ final class TapeStreamReader {
         while let line = try readLine() {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed == "# ---" || trimmed == "---" || trimmed.hasPrefix("# ---") {
+                if version == 9 { packing = .base512 }
                 headerDone = true
                 return
             }
@@ -558,6 +576,9 @@ final class TapeStreamReader {
             } else if trimmed.hasPrefix("# PaperTape File v") {
                 let vStr = trimmed.replacingOccurrences(of: "# PaperTape File v", with: "")
                 let ver = Int(vStr.trimmingCharacters(in: .whitespaces)) ?? 0
+                version = ver
+                if ver > TapeEngine.formatVersion { throw TapeEngine.FormatError.unsupportedVersion(ver) }
+                if ver == 9 { packing = .base512 }
                 if packing == .binary {
                     if ver >= 8 { packing = .base256 }
                     else if ver >= 7 { packing = .hexadecimal }
@@ -567,6 +588,7 @@ final class TapeStreamReader {
                 }
             }
         }
+        if version == 9 { throw TapeEngine.base512Error("missing header separator") }
         headerDone = true
     }
 
@@ -580,6 +602,11 @@ final class TapeStreamReader {
         case fileEnd
         case end
     }
+
+    private var base512Decoder = TapeEngine.Base512Decoder()
+    private var base512Columns: [TapeEngine.Column] = []
+    private var base512Offset = 0
+    private var version = 0
 
     private var currentBlockStored: (crc: UInt32, xor: UInt8, sum: UInt8, len: Int)?
     private var currentBlockBytes = Data()
@@ -596,6 +623,7 @@ final class TapeStreamReader {
     func nextEvent() throws -> Event {
         try readHeader()
         if eof { return .end }
+        if packing == .base512 { return try nextBase512Event() }
 
         while let line = try readLine() {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -820,6 +848,53 @@ final class TapeStreamReader {
         }
         eof = true
         return .end
+    }
+
+    private func nextBase512Event() throws -> Event {
+        guard mode != "archive" else { throw TapeEngine.base512Error("use archive extraction") }
+        while let line = try readLine() {
+            let text = line.trimmingCharacters(in: .whitespaces)
+            if text.hasPrefix("# @block") {
+                guard currentBlockStored == nil,
+                      let marker = TapeEngine.parseBlockMarker(text),
+                      marker.index == blocksChecked, marker.off == base512Offset,
+                      marker.len > 0, marker.len <= blockSize else {
+                    throw TapeEngine.base512Error("invalid block marker")
+                }
+                currentBlockStored = (marker.crc, marker.xor, marker.sum, marker.len)
+            } else if text.hasPrefix("# punched-size:") {
+                let raw = text.dropFirst("# punched-size:".count).trimmingCharacters(in: .whitespaces)
+                guard let size = Int64(raw), size >= 0, punchedSize == nil || punchedSize == size else {
+                    throw TapeEngine.base512Error("invalid or contradictory punched size")
+                }
+                punchedSize = size
+            } else if !text.isEmpty, !text.hasPrefix("#") {
+                guard let stored = currentBlockStored, let column = TapeEngine.parseBase512Token(text) else {
+                    throw TapeEngine.base512Error("invalid or unprotected column")
+                }
+                base512Columns.append(column)
+                if base512Columns.count == stored.len {
+                    try TapeEngine.validateBase512Block(base512Columns, stored: stored)
+                    var data = Data()
+                    for column in base512Columns {
+                        base512Decoder.append(column.base512Value, to: &data)
+                    }
+                    base512Offset += base512Columns.count
+                    blocksChecked += 1
+                    base512Columns.removeAll(keepingCapacity: true)
+                    currentBlockStored = nil
+                    if !data.isEmpty { return .data(data) }
+                }
+            }
+        }
+        guard currentBlockStored == nil else { throw TapeEngine.base512Error("truncated block") }
+        if compression == .none, transfer == .identity, let headerSize, headerSize != punchedSize {
+            throw TapeEngine.base512Error("original and punched sizes differ")
+        }
+        var tail = Data()
+        try base512Decoder.finish(byteCount: punchedSize, to: &tail)
+        eof = true
+        return tail.isEmpty ? .end : .data(tail)
     }
 
     /// Read all remaining payload as concatenated punched bytes (for modest streams).
@@ -1456,6 +1531,7 @@ extension TapeEngine {
         punchedBytes: Int,
         fileFormat: TapeFileFormat
     ) -> Int64 {
+        if fileFormat == .v9 { return Int64(punchedBytes - punchedBytes / 9) }
         if fileFormat.usesBase256Packing, punchedBytes > 0 {
             return Int64((punchedBytes + 7) / 8)
         }
@@ -1569,12 +1645,15 @@ extension TapeEngine {
             return (Int64(payload.count), ok, failed)
         }
 
-        if FileManager.default.fileExists(atPath: outputURL.path) {
-            try FileManager.default.removeItem(at: outputURL)
+        let strict = reader.packing == .base512
+        let writeURL = strict ? outputURL.deletingLastPathComponent()
+            .appendingPathComponent(".papertape-restore-\(UUID().uuidString)") : outputURL
+        if !strict, FileManager.default.fileExists(atPath: writeURL.path) {
+            try FileManager.default.removeItem(at: writeURL)
         }
-        FileManager.default.createFile(atPath: outputURL.path, contents: nil)
+        FileManager.default.createFile(atPath: writeURL.path, contents: nil)
         do {
-            let out = try FileHandle(forWritingTo: outputURL)
+            let out = try FileHandle(forWritingTo: writeURL)
             defer { try? out.close() }
 
             var completed: Int64 = 0
@@ -1591,6 +1670,14 @@ extension TapeEngine {
                 case .fileBegin, .fileEnd:
                     continue
                 case .end:
+                    if strict {
+                        try out.close()
+                        // The scratch file is a sibling so this rename is atomic.
+                        guard rename(writeURL.path, outputURL.path) == 0 else {
+                            throw FormatError.io("Could not publish the verified v9 restore")
+                        }
+                        return (completed, true, 0)
+                    }
                     // Trailer may set punched-size after body emit; trim dense remainder pad.
                     if let lim = reader.punchedSize, lim > 0, completed > lim {
                         try out.truncate(atOffset: UInt64(lim))
@@ -1606,7 +1693,7 @@ extension TapeEngine {
             }
         } catch {
             // Do not leave a half-written restore target (matches encode cleanup).
-            try? FileManager.default.removeItem(at: outputURL)
+            try? FileManager.default.removeItem(at: writeURL)
             throw error
         }
     }
@@ -1786,13 +1873,15 @@ extension TapeEngine {
             "# block-size: \(defaultBlockSize)",
             "# integrity: crc32+xor+sum8",
             "# columns: \(fileFormat.columnsHeaderValue)",
-            "# channels: \(channelCount)",
+            "# channels: \(fileFormat == .v9 ? 9 : channelCount)",
             "# bit-order: channel-1-lsb",
-            "# layout: ch1 ch2 ch3 feed ch4 ch5 ch6 ch7 ch8",
+            "# layout: ch1 ch2 ch3 feed ch4 ch5 ch6 ch7 ch8\(fileFormat == .v9 ? " ch9" : "")",
             "# glyphs: \(glyphStyle.headerDescription)",
             "# stream: 1",
         ]
-        if fileFormat.usesTernaryPacking {
+        if fileFormat == .v9 {
+            headerLines += ["# packing: b512", "# packing-base: 512", "# channel-states: 2"]
+        } else if fileFormat.usesTernaryPacking {
             // Whole-file members use full pack; streamed members use block3.
             headerLines.append("# packing: full")
             headerLines.append("# packing-base: \(ternaryBase)")
@@ -1908,7 +1997,10 @@ extension TapeEngine {
             if useWholeFile {
                 let packMode: String
                 let packChunk: Int
-                if fileFormat.usesTernaryPacking {
+                if fileFormat == .v9 {
+                    packMode = "b512"
+                    packChunk = 0
+                } else if fileFormat.usesTernaryPacking {
                     packMode = "full"
                     packChunk = preferredTernaryPackChunk(byteCount: punchedBytes.count)
                 } else if fileFormat.usesQuaternaryPacking {
@@ -1946,7 +2038,9 @@ extension TapeEngine {
                 // Oversized after load — stream-style dense packing (block3 for v4, not full).
                 // Full ternary would force multi-MiB digit buffers on extract and fail the cap.
                 let packMode: String
-                if fileFormat.usesTernaryPacking {
+                if fileFormat == .v9 {
+                    packMode = "b512"
+                } else if fileFormat.usesTernaryPacking {
                     packMode = "block3"
                 } else if fileFormat.usesQuaternaryPacking {
                     packMode = "quat"
@@ -1976,7 +2070,9 @@ extension TapeEngine {
                 wroteFromBuffer = true
             } else {
                 let streamPack: String
-                if fileFormat.usesTernaryPacking {
+                if fileFormat == .v9 {
+                    streamPack = "b512"
+                } else if fileFormat.usesTernaryPacking {
                     streamPack = "block3"
                 } else if fileFormat.usesQuaternaryPacking {
                     streamPack = "quat"
@@ -1997,7 +2093,27 @@ extension TapeEngine {
                 wroteFromBuffer = false
             }
 
-            if !wroteFromBuffer {
+            if !wroteFromBuffer, fileFormat == .v9 {
+                let input = try FileHandle(forReadingFrom: fileURL)
+                defer { try? input.close() }
+                let writer = Base512BlockWriter(handle: handle, blockSize: defaultBlockSize)
+                var memberBytes: Int64 = 0
+                while let chunk = try input.read(upToCount: 64 * 1024), !chunk.isEmpty {
+                    try cancel?.throwIfCancelled()
+                    try writer.append(chunk, cancel: cancel)
+                    memberBytes += Int64(chunk.count)
+                    bytesDone += Int64(chunk.count)
+                    progress?(TapeProgress(phase: "Packing \(entry.relativePath)",
+                                           unitsCompleted: bytesDone, unitsTotal: totalBytes))
+                }
+                if originalSize > 0, originalSize != memberBytes {
+                    throw base512Error("input size changed for \(entry.relativePath)")
+                }
+                try writer.finish()
+                globalColumns += Int64(writer.columns)
+                globalBinaryPunched += memberBytes
+                try handle.write(contentsOf: Data("# @endfile punched=\(memberBytes) size=\(memberBytes)\n".utf8))
+            } else if !wroteFromBuffer {
                 // Stream raw columns from disk.
                 let input = try FileHandle(forReadingFrom: fileURL)
                 defer { try? input.close() }
@@ -2275,6 +2391,12 @@ extension TapeEngine {
         fileFormat: TapeFileFormat,
         cancel: EncodeCancelToken? = nil
     ) throws -> Int {
+        if fileFormat == .v9 {
+            let writer = Base512BlockWriter(handle: handle, blockSize: max(1, blockSize))
+            try writer.append(data, cancel: cancel)
+            try writer.finish()
+            return writer.columns
+        }
         guard !data.isEmpty else { return 0 }
         if fileFormat.usesTernaryPacking {
             let digits = packTernaryBlock3(data)
@@ -2328,6 +2450,12 @@ extension TapeEngine {
         fileFormat: TapeFileFormat,
         cancel: EncodeCancelToken? = nil
     ) throws -> Int {
+        if fileFormat == .v9 {
+            let writer = Base512BlockWriter(handle: handle, blockSize: max(1, blockSize))
+            try writer.append(data, cancel: cancel)
+            try writer.finish()
+            return writer.columns
+        }
         guard !data.isEmpty else { return 0 }
         let bs = max(1, blockSize)
 
@@ -2676,6 +2804,9 @@ extension TapeEngine {
 
         var mode = "blob"
         var totalHint: Int64?
+        var archiveVersion = 0
+        var expectedMembers: Int?
+        var archiveComplete = false
         var headerPacking = PackingMode.binary
         var inBody = false
         while let line = try readLine() {
@@ -2684,6 +2815,8 @@ extension TapeEngine {
                 mode = String(t.dropFirst("# mode:".count)).trimmingCharacters(in: .whitespaces)
             } else if t.hasPrefix("# size:") {
                 totalHint = Int64(String(t.dropFirst("# size:".count)).trimmingCharacters(in: .whitespaces))
+            } else if t.hasPrefix("# members:") {
+                expectedMembers = Int(t.dropFirst("# members:".count).trimmingCharacters(in: .whitespaces))
             } else if t.hasPrefix("# packing:") {
                 headerPacking = PackingMode.parse(String(t.dropFirst("# packing:".count)))
             } else if t.hasPrefix("# columns:") {
@@ -2702,6 +2835,8 @@ extension TapeEngine {
             } else if t.hasPrefix("# PaperTape File v") {
                 let vStr = t.replacingOccurrences(of: "# PaperTape File v", with: "")
                 let ver = Int(vStr.trimmingCharacters(in: .whitespaces)) ?? 0
+                archiveVersion = ver
+                if ver > formatVersion { throw FormatError.unsupportedVersion(ver) }
                 if headerPacking == .binary {
                     if ver >= 8 { headerPacking = .base256 }
                     else if ver >= 7 { headerPacking = .hexadecimal }
@@ -2714,6 +2849,7 @@ extension TapeEngine {
                 break
             }
         }
+        if archiveVersion == 9 { headerPacking = .base512 }
         guard mode == "archive" else {
             throw FormatError.io("Not a folder archive (.Tape mode is “\(mode)”)")
         }
@@ -2882,8 +3018,26 @@ extension TapeEngine {
             }
         }
 
+        var memberDecoder = Base512Decoder()
+        var memberBlockOffset = 0
+        var memberBlockIndex = 0
+
         func finishMember() throws {
             try flushBlockIntoMember()
+            if currentPacking == .base512 {
+                var tail = Data()
+                let exactSize = currentPunchedSize
+                try memberDecoder.finish(byteCount: exactSize.map(Int64.init), to: &tail)
+                if let writer = currentWriter {
+                    guard currentOriginalSize == exactSize else {
+                        throw base512Error("incorrect archive member size")
+                    }
+                    try writer.write(contentsOf: tail)
+                    bytes += Int64(tail.count)
+                } else {
+                    punchedBuffer.append(tail)
+                }
+            }
             // Flush odd block3 carry if any (pair with zero digit).
             if streamBlock3, currentPacking == .ternaryBlock3, let carry = archiveBlock3Carry,
                let w = currentWriter {
@@ -2902,7 +3056,9 @@ extension TapeEngine {
             }
             if needsBuffer {
                 var stage: Data
-                if currentPacking.isMultistate {
+                if currentPacking == .base512 {
+                    stage = punchedBuffer
+                } else if currentPacking.isMultistate {
                     let byteCount = currentPunchedSize
                         ?? currentOriginalSize
                         ?? 0
@@ -2958,6 +3114,9 @@ extension TapeEngine {
                         expectedSize: currentOriginalSize ?? 0
                     )
                 }
+                if currentPacking == .base512, currentOriginalSize != stage.count {
+                    throw base512Error("incorrect restored archive member size")
+                }
                 if let dest = currentDest {
                     try stage.write(to: dest, options: .atomic)
                     bytes += Int64(stage.count)
@@ -2983,6 +3142,25 @@ extension TapeEngine {
 
         func flushBlockIntoMember() throws {
             guard !blockCols.isEmpty || blockStored != nil else { return }
+            if currentPacking == .base512 {
+                try validateBase512Block(blockCols, stored: blockStored)
+                var decoded = Data()
+                for column in blockCols { memberDecoder.append(column.base512Value, to: &decoded) }
+                if let writer = currentWriter {
+                    try writer.write(contentsOf: decoded)
+                    bytes += Int64(decoded.count)
+                } else {
+                    guard punchedBuffer.count + decoded.count <= streamingByteThreshold * 2 else {
+                        throw base512Error("transformed archive member exceeds buffer limit")
+                    }
+                    punchedBuffer.append(decoded)
+                }
+                memberBlockOffset += blockCols.count
+                memberBlockIndex += 1
+                blockCols.removeAll(keepingCapacity: true)
+                blockStored = nil
+                return
+            }
             if let st = blockStored, !blockCols.isEmpty {
                 let integ = integrityData(for: blockCols[...])
                 let crc = crc32(integ)
@@ -3046,13 +3224,22 @@ extension TapeEngine {
 
         while let line = try readLine() {
             let t = line.trimmingCharacters(in: .whitespaces)
-            if t.hasPrefix("# ===") { break }
+            if t.hasPrefix("# ===") {
+                archiveComplete = t == "# === archive complete ==="
+                break
+            }
 
             if t.hasPrefix("# @file") {
+                if headerPacking == .base512, currentPath != nil {
+                    throw base512Error("missing archive member terminator")
+                }
                 try finishMember()
                 let meta = TapeStreamReader.parseFileMarkerPublic(t)
                 let safe = sanitizeArchivePath(meta.path)
-                guard !safe.isEmpty else { continue }
+                guard !safe.isEmpty else {
+                    if headerPacking == .base512 { throw base512Error("invalid archive member path") }
+                    continue
+                }
                 let dest = staging.appendingPathComponent(safe)
                 try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
                 if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
@@ -3065,7 +3252,11 @@ extension TapeEngine {
                 currentPunchedSize = meta.punchedSize.map { Int($0) }
                 currentPackChunk = meta.packChunk
                 // Per-file packing wins; else archive header default.
-                currentPacking = meta.packing != .binary ? meta.packing : headerPacking
+                currentPacking = headerPacking == .base512 ? .base512
+                    : (meta.packing != .binary ? meta.packing : headerPacking)
+                memberDecoder = Base512Decoder()
+                memberBlockOffset = 0
+                memberBlockIndex = 0
                 // Buffer when decompress/Base85 needed, or full ternary pack (needs all digits).
                 // Raw block3 can stream-decode to disk.
                 streamBlock3 =
@@ -3079,7 +3270,7 @@ extension TapeEngine {
                 needsBuffer =
                     meta.compression != .none
                     || meta.transfer == .ascii85
-                    || (currentPacking.isMultistate && !streamBlock3)
+                    || (currentPacking.isMultistate && currentPacking != .base512 && !streamBlock3)
                 punchedBuffer = Data()
                 ternaryDigits = []
                 base256Digits = []
@@ -3115,6 +3306,9 @@ extension TapeEngine {
             }
 
             if t.hasPrefix("# @endfile") {
+                if headerPacking == .base512, currentPath == nil {
+                    throw base512Error("unexpected archive member terminator")
+                }
                 // Optional: `# @endfile punched=N size=N` from stream archive members.
                 let rest = String(t.dropFirst("# @endfile".count))
                 for part in rest.split(separator: " ") {
@@ -3123,6 +3317,9 @@ extension TapeEngine {
                     let key = p[0].lowercased()
                     let val = String(p[1])
                     if key == "punched", let n = Int(val), n >= 0 {
+                        if currentPacking == .base512, let previous = currentPunchedSize, previous != n {
+                            throw base512Error("contradictory archive punched size")
+                        }
                         currentPunchedSize = n
                     } else if key == "size", let n = Int(val), n >= 0 {
                         if currentOriginalSize == nil || (currentOriginalSize ?? 0) <= 0 {
@@ -3136,7 +3333,15 @@ extension TapeEngine {
 
             if t.hasPrefix("# @block") {
                 try flushBlockIntoMember()
-                if let m = parseBlockMarker(t) {
+                let marker = parseBlockMarker(t)
+                if headerPacking == .base512 {
+                    guard currentPath != nil, let marker, marker.off == memberBlockOffset,
+                          marker.index == memberBlockIndex, marker.len > 0,
+                          marker.len <= defaultBlockSize else {
+                        throw base512Error("invalid archive block marker")
+                    }
+                }
+                if let m = marker {
                     blockStored = (m.crc, m.xor, m.sum, m.len)
                     blockCols = []
                     blockCols.reserveCapacity(max(m.len, defaultBlockSize))
@@ -3155,14 +3360,20 @@ extension TapeEngine {
             let preferOct = currentPacking.isOctal || headerPacking.isOctal
             let preferHex = currentPacking.isHexadecimal || headerPacking.isHexadecimal
             let preferB256 = currentPacking.isBase256 || headerPacking.isBase256
-            guard let col = parseColumnToken(
+            guard let col = headerPacking == .base512 ? parseBase512Token(tokenPart) : parseColumnToken(
                 tokenPart,
                 preferTernary: preferTernary,
                 preferQuaternary: preferQuat,
                 preferOctal: preferOct,
                 preferHexadecimal: preferHex,
                 preferBase256: preferB256
-            ) else { continue }
+            ) else {
+                if headerPacking == .base512 { throw base512Error("invalid archive column") }
+                continue
+            }
+            if headerPacking == .base512, blockStored == nil {
+                throw base512Error("unprotected archive column")
+            }
             blockCols.append(col)
             if let st = blockStored, st.len > 0, blockCols.count >= st.len {
                 try flushBlockIntoMember()
@@ -3172,6 +3383,12 @@ extension TapeEngine {
                 unitsCompleted: bytes,
                 unitsTotal: totalHint
             ))
+        }
+        if headerPacking == .base512 {
+            guard archiveComplete, currentPath == nil, expectedMembers == fileCount,
+                  totalHint == bytes else {
+                throw base512Error("incomplete archive or incorrect archive totals")
+            }
         }
         try finishMember()
         // Promote staged members into the destination only after a full successful extract.

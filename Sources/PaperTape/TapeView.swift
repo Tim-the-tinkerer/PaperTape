@@ -20,11 +20,15 @@ struct TapeStripView: View {
     private let legendHeight: CGFloat = 18
 
     /// Visual channel order top → bottom: 8…4, feed, 3…1
-    private static let visualRows: [RowKind] = [
+    private static let legacyRows: [RowKind] = [
         .channel(8), .channel(7), .channel(6), .channel(5), .channel(4),
         .feed,
         .channel(3), .channel(2), .channel(1),
     ]
+
+    private var visualRows: [RowKind] {
+        document.packing == .base512 ? [.channel(9)] + Self.legacyRows : Self.legacyRows
+    }
 
     private enum RowKind {
         case channel(Int)
@@ -43,7 +47,7 @@ struct TapeStripView: View {
     }
 
     private var tapeHeight: CGFloat {
-        marginY * 2 + CGFloat(Self.visualRows.count) * channelSpacing
+        marginY * 2 + CGFloat(visualRows.count) * channelSpacing
     }
 
     private var totalHeight: CGFloat {
@@ -84,7 +88,7 @@ struct TapeStripView: View {
         let showLeg = showLegend
         let hi = highlightIndex
         let paper = paperColor
-        let rows = Self.visualRows
+        let rows = visualRows
 
         return Canvas { context, size in
             let paperRect = CGRect(x: 0, y: 0, width: size.width, height: tH)
@@ -179,7 +183,9 @@ struct TapeStripView: View {
 
                     if showLeg {
                         let label: String
-                        if let c = col.printableChar {
+                        if col.isBase512 {
+                            label = String(col.base512Value)
+                        } else if let c = col.printableChar {
                             label = String(c)
                         } else {
                             label = "·"
@@ -289,10 +295,12 @@ struct TapeStripView: View {
     }
 }
 
-/// Channel legend labels shown beside the tape (fixed 9 rows — safe).
+/// Channel legend labels shown beside the tape.
 struct TapeChannelLegend: View {
+    var nineChannels = false
     var body: some View {
         VStack(alignment: .trailing, spacing: 0) {
+            if nineChannels { Text("ch9").frame(height: 14) }
             Text("ch8").frame(height: 14)
             Text("ch7").frame(height: 14)
             Text("ch6").frame(height: 14)
@@ -320,7 +328,11 @@ enum TapeImageExporter {
     ) -> Data? {
         let cols = Array(document.columns.prefix(maxColumns))
         let limited = TapeEngine.TapeDocument(
-            columns: cols.enumerated().map { TapeEngine.Column(id: $0.offset, holes: $0.element.holes) },
+            columns: cols.enumerated().map { index, column in
+                var copy = column
+                copy.id = index
+                return copy
+            },
             originalName: document.originalName,
             originalSize: document.originalSize,
             compression: document.compression,
@@ -333,7 +345,8 @@ enum TapeImageExporter {
         let edgePad: CGFloat = 24
         let marginY: CGFloat = 16
         let channelSpacing: CGFloat = 16
-        let rows = 9
+        let nineChannels = document.packing == .base512
+        let rows = nineChannels ? 10 : 9
         let legendH: CGFloat = 22
         let headerH: CGFloat = 28
         let width = max(edgePad * 2 + CGFloat(max(cols.count, 1)) * columnWidth, 320)
@@ -382,7 +395,7 @@ enum TapeImageExporter {
         ctx.addPath(paperPath)
         ctx.fillPath()
 
-        let visualChannels: [Int?] = [8, 7, 6, 5, 4, nil, 3, 2, 1]
+        let visualChannels: [Int?] = (nineChannels ? [9] : []) + [8, 7, 6, 5, 4, nil, 3, 2, 1]
 
         for col in limited.columns {
             let x = edgePad + CGFloat(col.id) * columnWidth + columnWidth * 0.5
@@ -400,7 +413,9 @@ enum TapeImageExporter {
         for col in limited.columns {
             let x = edgePad + CGFloat(col.id) * columnWidth + columnWidth * 0.5
             let label: String
-            if let c = col.printableChar {
+            if nineChannels {
+                label = String(col.base512Value)
+            } else if let c = col.printableChar {
                 label = String(c)
             } else {
                 label = "·"

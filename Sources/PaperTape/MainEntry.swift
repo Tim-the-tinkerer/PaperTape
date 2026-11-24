@@ -242,9 +242,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Encode data as classic 8-channel punched paper tape.
 
                 Binary dialects (v1–v3): one byte per column (ch1 = LSB).
-                Default write: v7 hexadecimal (32 bits/col). v8 base-256 — experimental maximum density (64 bits/col, grayscale).
+                Default write: v7 hexadecimal (32 bits/col). v8 base-256 — experimental maximum density (64 bits/col, grayscale). v9 Base512 uses nine binary channels and a separate sprocket.
                 .Tape files round-trip losslessly; only v1 embeds a terminal-paper preview footer.
-                Suggested save names: name-v1.Tape … name-v8.Tape.
+                Suggested save names: name-v1.Tape … name-v9.Tape.
 
                 Double-click a .Tape file to open it.
                 """,

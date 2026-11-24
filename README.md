@@ -1,13 +1,14 @@
 # PaperTape
 
-A macOS app that encodes data as **classic 8-channel punched paper tape** — both as an interactive visual strip and as a portable **`.Tape`** digital file.
+A macOS app that encodes data as **punched paper tape with eight or nine data channels** — both as an interactive visual strip and as a portable **`.Tape`** digital file.
 
 ## Features
 
 - **Encode text** — type or paste; live strip updates as you go
-- **Visual tape** — warm teleprinter paper with data holes and a sprocket (feed) track (binary full/blank; multi-state v4–v6 draw progressive hole depths)
-- **`.Tape` files** — UTF-8 visual column format that round-trips losslessly (**v1–v8** write dialects)
+- **Visual tape** — warm teleprinter paper with data holes and a sprocket (feed) track (binary full/blank; multi-state v4–v7 draw progressive hole depths; v8 uses grayscale)
+- **`.Tape` files** — UTF-8 visual column format that round-trips losslessly (**v1–v9** write dialects)
 - **v7 hexadecimal (default)** — **32 bits/column** (4 bytes/col); 16 hole depths + feed `o`
+- **v9 nine-channel binary (Base512)** — nine on/off data holes plus a separate sprocket, with exact-length bit packing for files and folder archives.
 - **v8 base-256 — experimental maximum density** — **64 bits/column** (8 bytes/col); each channel is a grayscale byte; tokens use hex pairs + `o`
 - **v6 octal** — **24 bits/column** (3 bytes/col); glyphs `.` `,` `:` `+` `=` `x` `%` `*` `o`
 - **v5 quaternary** — **16 bits/column** (2 bytes/col); glyphs `.` `+` `=` `*` `o`
@@ -26,10 +27,10 @@ A macOS app that encodes data as **classic 8-channel punched paper tape** — bo
 
 ## Channel map
 
-Physical layout across the strip (edge → edge):
+Physical layout across the strip (edge → edge; ch9 is present only in v9):
 
 ```
-ch1  ch2  ch3  ○feed  ch4  ch5  ch6  ch7  ch8
+ch1  ch2  ch3  ○feed  ch4  ch5  ch6  ch7  ch8  [ch9]
 ```
 
 | Channel | Bit |
@@ -42,7 +43,8 @@ ch1  ch2  ch3  ○feed  ch4  ch5  ch6  ch7  ch8
 | ch5     | 4 |
 | ch6     | 5 |
 | ch7     | 6 |
-| ch8     | 7 (MSB) |
+| ch8     | 7 (MSB in v1–v3) |
+| ch9 (v9 only) | 8 (MSB in v9) |
 
 Glyphs in the digital format:
 
@@ -55,17 +57,18 @@ Glyphs in the digital format:
 | **v6** | 8 | `.` `,` `:` `+` `=` `x` `%` `*` + `o` feed |
 | **v7** | 16 | `.` `,` `:` `+` `=` `x` `%` `a`…`g` `@` `*` + `o` feed |
 | **v8** | 256 | hex pairs `00`–`ff` per channel + `o` feed (grayscale) |
+| **v9** | 2 | Nine `.` or `*` positions + `o` feed |
 
 ## Pipeline
 
 ```
-original bytes → [compress] → [Base85] → [dense pack if v4–v8] → column tokens → .Tape text
+original bytes → [compress] → [Base85] → [pack if v4–v9] → column tokens → .Tape text
 ```
 
 Inverse on restore / export:
 
 ```
-.Tape columns → [dense unpack if v4–v8] → [Base85 decode] → [decompress] → original bytes
+.Tape columns → [unpack if v4–v9] → [Base85 decode] → [decompress] → original bytes
 ```
 
 Compression and Base85 only change which **payload** bytes sit on the strip. Format chooses packing and column glyphs. The in-app strip and PNG keep a classic paper look (multi-state formats draw multiple hole sizes).
@@ -74,7 +77,7 @@ Compression and Base85 only change which **payload** bytes sit on the strip. For
 
 UTF-8 text. The body (column lines + `# @block` markers) is the source of truth for decode. A terminal-paper preview footer is written only for **v1** (comments only; never parsed as columns).
 
-**Dialect details and size comparisons:** see **[FORMAT.md](FORMAT.md)** (v1–v8, glyphs, packing, approximate reductions).
+**Dialect details and size comparisons:** see **[FORMAT.md](FORMAT.md)** (v1–v9, glyphs, packing, approximate reductions).
 
 ### Format versions
 
@@ -88,6 +91,7 @@ UTF-8 text. The body (column lines + `# @block` markers) is the source of truth 
 | **v6** | ASCII multilevel + `o` | **3 bytes/col (24 bits)** | No | No | **v6 octal** |
 | **v7** (default write) | 16 ASCII depths + `o` | **4 bytes/col (32 bits)** | No | No | **v7 hexadecimal** |
 | **v8** | hex pairs `00`–`ff` + `o` | **8 bytes/col (64 bits)** | No | No | **v8 base-256 — experimental maximum density** |
+| **v9** | Nine ASCII binary positions + `o` | **9 bits/column** | No | No | **v9 nine-channel binary (Base512)** |
 
 Example v8 token: `a3f201o00ffc80011` — two hex digits per channel (full byte), feed `o`.  
 Visually the strip is eight **grayscale** holes per column (less classic “punch depth”, intentionally more byte-grid).
@@ -95,6 +99,8 @@ Visually the strip is eight **grayscale** holes per column (less classic “punc
 **v7** (default): \(16^8 = 2^{32}\) → four bytes/col — practical multilevel density.  
 **v8 base-256 — experimental maximum density**: \(256^8 = 2^{64}\) → **eight payload bytes per column** (⌈N/8⌉).  
 **v6** octal: three bytes/col. **v5** quat: two bytes/col. **v4** ternary: ~12.68 bits/col.
+
+**v9 Base512**: 2⁹ = 512 possible patterns, **9 bits/column**. A continuous MSB-first bitstream is packed into nine-bit symbols, with zero padding only at the end. For N punched bytes, the tape contains N − floor(N/9) columns. The sprocket is not data. Example: `*..o.....*` represents 257. This is a wider binary tape, not a replacement for v8 maximum density. See [FORMAT.md](FORMAT.md#v9-nine-channel-binary-base512) for the bit order, padding and integrity rules.
 
 All versions share integrity markers, compression/Base85, streaming, and archives. Readers accept any known version. Only **writing** is controlled by the **Format** picker.
 
@@ -147,15 +153,16 @@ See `Examples/` in the repo.
 |-------|---------|
 | `# name:` | Original filename (or folder name for archives) |
 | `# size:` | Uncompressed original length (bytes); for archives, total of members |
-| `# punched-size:` | Binary payload bytes on the strip (before dense pack for v4–v6) |
+| `# punched-size:` | Binary payload bytes on the strip (before packing for v4–v9) |
 | `# compression: none\|lzfse\|zlib\|lz4\|lzma` | Codec actually used (never `auto`) |
 | `# transfer: identity\|ascii85` | Transfer encoding after compression |
 | `# block-size:` | Columns per integrity block (default **64**) |
 | `# integrity: crc32+xor+sum8` | Integrity scheme |
-| `# columns: annotated\|compact\|ascii\|ternary\|quaternary\|octal\|hexadecimal\|base256` | Write dialect body style |
-| `# packing: full\|block3\|quat\|oct\|hex\|b256` | Dense pack mode |
-| `# packing-base:` | States per column (v4…v8: 6561 … \(2^{64}\)) |
-| `# channel-states:` | **3** / **4** / **8** / **16** / **256** for v4…v8 |
+| `# columns: annotated\|compact\|ascii\|ternary\|quaternary\|octal\|hexadecimal\|base256\|base512` | Write dialect body style |
+| `# packing: full\|block3\|quat\|oct\|hex\|b256\|b512` | Dense pack mode |
+| `# channels:` | 8 for v1–v8; 9 for v9 (excluding sprocket) |
+| `# packing-base:` | States per column (v4…v8: 6561 … \(2^{64}\); v9: 512) |
+| `# channel-states:` | **3** / **4** / **8** / **16** / **256** for v4…v8; **2** for v9 |
 | `# ternary-columns:` / `# quaternary-columns:` / `# octal-columns:` / `# hexadecimal-columns:` / `# base256-columns:` | Dense column counts |
 | `# pack-chunk:` | v4 full pack: 0 = whole payload; 4096 = fixed chunks (linear time) |
 | `# mode: blob\|stream\|archive` | Container kind (omitted ⇒ blob) |
@@ -180,6 +187,7 @@ Integrity is CRC-32 + XOR + SUM8 over each block’s **integrity bytes** (not th
 | **v6** octal | 3-byte little-endian column value (24-bit) |
 | **v7** hexadecimal | 4-byte little-endian column value (32-bit) |
 | **v8** base-256 | 8 channel bytes (ch1…ch8 order) |
+| **v9** Base512 | 2-byte little-endian symbol (0–511) |
 
 On open, PaperTape verifies each block and shows **Integrity OK** or **FAIL** (which block(s)) on the Tape tab. Damaged transmission can be localized without re-checking the entire tape as one unit.
 
@@ -270,7 +278,7 @@ Requires macOS 13+ and Xcode command-line tools / Swift 5.9+.
 1. **Encode** — type text; columns appear on the strip as you type  
 2. **Compress** — **Auto** (default) or **Off** (payload only)  
 3. **Base85** — optional printable transfer encoding after compression  
-4. **Format** — **v7 hexadecimal** (default), **v8 base-256 — experimental maximum density**, …, or **v1 annotated** (see [FORMAT.md](FORMAT.md))  
+4. **Format** — **v7 hexadecimal** (default), **v9 nine-channel binary (Base512)**, **v8 base-256 — experimental maximum density**, …, or **v1 annotated** (see [FORMAT.md](FORMAT.md))  
 5. **Save .Tape…** — write the digital visual representation (suggested name includes `-vN`, e.g. `message-v7.Tape`)  
 6. **Drop** a file or folder onto the window — save sheet, then punch (**progress** + **Cancel** in the footer)  
 7. **Files** — choose file/folder to punch (also **Cancel** while working), open a `.Tape`, or restore/extract  
@@ -284,7 +292,7 @@ Requires macOS 13+ and Xcode command-line tools / Swift 5.9+.
 - **About** tab → **Run self-test**, or  
 - `PaperTape --self-test` (exits non-zero on failure)
 
-Covers text/unicode round-trips, compression codecs, Base85, integrity blocks, dense packing (v4–v8), and folder archive pack/extract.
+Covers text/unicode round-trips, compression codecs, Base85, integrity blocks, packing (v4–v9), and folder archive pack/extract.
 
 ## Changelog
 

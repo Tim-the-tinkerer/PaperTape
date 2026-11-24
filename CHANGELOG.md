@@ -5,6 +5,19 @@ All notable changes to **PaperTape** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased] — v9 tape format
+
+### Added
+
+- **`.Tape` format v9 — nine-channel binary (Base512)**: nine on/off data channels plus a separate sprocket, yielding 512 patterns and 9 bits per column.
+- MSB-first continuous bit packing; final-symbol zero padding and exact punched-byte length validation. Packing continues across streaming chunks and integrity blocks, and restarts for each archive member.
+- ASCII tokens use nine `.`/`*` data positions with `o` as the fourth character. Headers identify `base512`, `b512`, 9 channels, 512 patterns and 2 channel states.
+- Integrity uses two little-endian bytes per symbol; readers validate block checksums, column count and zero padding.
+- v9 support in format selection, visualization, file and folder streaming, and CLI `--format v9`. Example: `Examples/message-v9.Tape`.
+- Format documentation includes v9 density and size comparisons. v7 remains the default; v8 remains the maximum-density option.
+
+The application bundle still reports 1.12.2; v9 is a tape format version, not an application version.
+
 ## [1.12.2] - 2026-08-07
 
 ### Fixed

@@ -1,22 +1,22 @@
 # PaperTape `.Tape` format versions
 
-This document describes the on-disk **write dialects** for `.Tape` files (**v1–v8**), how they differ, and **approximate file size** impact.
+This document describes the on-disk **write dialects** for `.Tape` files (**v1–v9**), how they differ, and **approximate file size** impact.
 
 | | |
 |--|--|
-| **Readers** | Accept any known version (**v1…v8**) |
+| **Readers** | Accept any known version (**v1…v9**) |
 | **Default write** | **v7 hexadecimal** |
 | **Experimental** | **v8 base-256 — experimental maximum density** |
-| **App** | **1.12.1** — see [README.md](README.md) for usage and build |
+| **App** | **1.12.2** — see [README.md](README.md) for usage and build |
 
-Format picker order in the app: **v1 → v2 → v3 → v4 → v5 → v6 → v7 → v8** (version order). Selection default is still **v7**.
+Format picker order in the app: **v1 → v2 → v3 → v4 → v5 → v6 → v7 → v8 → v9** (version order). Selection default is still **v7**.
 
 ---
 
 ## Pipeline (shared)
 
 ```
-original bytes → [compress] → [Base85] → [dense pack if v4–v8] → column tokens → .Tape text
+original bytes → [compress] → [Base85] → [pack if v4–v9] → column tokens → .Tape text
 ```
 
 | Version | Packing density |
@@ -27,6 +27,7 @@ original bytes → [compress] → [Base85] → [dense pack if v4–v8] → colum
 | **v6** | 3 bytes → 1 column (**24** bits) |
 | **v7** (default) | 4 bytes → 1 column (**32** bits) |
 | **v8** (experimental) | 8 bytes → 1 column (**64** bits) |
+| **v9** | 9 bits → 1 column (512 states) |
 
 Integrity (CRC-32 + XOR + SUM8) uses the packed column value:
 
@@ -37,34 +38,36 @@ Integrity (CRC-32 + XOR + SUM8) uses the packed column value:
 | v6 | 3 bytes |
 | v7 | 4 bytes |
 | v8 | 8 channel bytes |
+| v9 | LE `UInt16` (9-bit symbol) |
 
 ---
 
 ## Version summary
 
-| | v1 | v2 | v3 | v4 | v5 | v6 | **v7** (default) | v8 experimental |
-|--|----|----|----|----|----|----|------------------|-----------------|
-| `# columns:` | annotated | compact | ascii | ternary | quaternary | octal | **hexadecimal** | base256 |
-| Channel states | 2 | 2 | 2 | 3 | 4 | 8 | **16** | 256 |
-| Bits/col | 8 | 8 | 8 | ~12.68 | 16 | 24 | **32** | **64** |
-| Bytes/col | 1 | 1 | 1 | ~0.63 | 2 | 3 | **4** | **8** |
-| Token | 9 Unicode | 9 Unicode | 9 ASCII | 9 ASCII | 9 ASCII | 9 ASCII | **9 ASCII** | **17 hex+`o`** |
-| Integrity | 1 B | 1 B | 1 B | UInt16 | UInt16 | 3 B | **4 B** | **8 B** |
-| Annotations | Yes | No | No | No | No | No | No | No |
-| Terminal preview | Yes | No | No | No | No | No | No | No |
+| | v1 | v2 | v3 | v4 | v5 | v6 | **v7** (default) | v8 experimental | v9 Base512 |
+|--|----|----|----|----|----|----|------------------|-----------------| ------------ |
+| `# columns:` | annotated | compact | ascii | ternary | quaternary | octal | **hexadecimal** | base256 | base512 |
+| Channel states | 2 | 2 | 2 | 3 | 4 | 8 | **16** | 256 | 2 |
+| Bits/col | 8 | 8 | 8 | ~12.68 | 16 | 24 | **32** | **64** | 9 |
+| Bytes/col | 1 | 1 | 1 | ~0.63 | 2 | 3 | **4** | **8** | 1.125 |
+| Token | 9 Unicode | 9 Unicode | 9 ASCII | 9 ASCII | 9 ASCII | 9 ASCII | **9 ASCII** | **17 hex+`o`** | 10 ASCII |
+| Integrity | 1 B | 1 B | 1 B | UInt16 | UInt16 | 3 B | **4 B** | **8 B** | 2 B |
+| Annotations | Yes | No | No | No | No | No | No | No | No |
+| Terminal preview | Yes | No | No | No | No | No | No | No | No |
 
 ### Physical / token layout
 
-Channels are always laid out left → right as:
+Channels are laid out left → right as (ch9 only in v9):
 
 ```
-ch1  ch2  ch3  feed  ch4  ch5  ch6  ch7  ch8
+ch1  ch2  ch3  feed  ch4  ch5  ch6  ch7  ch8  [ch9]
 ```
 
 - **ch1** = least-significant digit / bit (LSB).
 - **feed** is always punched (not payload).
 - **v1–v7:** one character per channel + feed → **9-character** tokens.
 - **v8:** two hex digits per data channel + feed `o` → **17-character** tokens.
+- **v9:** nine binary data glyphs plus feed `o` → **10-character** tokens.
 
 ---
 
@@ -160,9 +163,9 @@ On-disk body remains ASCII; the in-app strip draws continuous **grayscale** hole
 
 ---
 
-## Packing (v4–v8)
+## Packing (v4–v9)
 
-Sections below follow **version order**. Only **v4–v8** use dense packing; **v1–v3** punch one byte per column.
+Sections below follow **version order**. Only **v4–v9** use bit/digit packing; **v1–v3** punch one byte per column.
 
 ### v4 packing
 
@@ -288,6 +291,38 @@ Parsing ignores trailing `# …` comments on column lines, so **v1 annotations a
 
 ---
 
+### v9 nine-channel binary (Base512)
+
+The header uses `# PaperTape File v9`, `# columns: base512`,
+`# packing: b512`, and `# channels: 9`. Each column has nine binary data
+positions and one sprocket. A data position is `*` for 1 or `.` for 0.
+The fourth character is always the separate sprocket `o`. In file order,
+the data positions are channels 1 through 9, with channel 1 the least
+significant bit of the symbol. For example, `*..o.....*` represents 257.
+
+Read input bytes MSB first as one continuous bitstream and take nine bits
+at a time, with the first bit becoming channel 9 of the symbol. Zero-fill
+the low bits of the last symbol when needed. For `N` punched bytes, the body
+has `N - floor(N / 9)` columns and the last column has `N mod 9` padding
+bits. For example, bytes `80 FF` produce symbols 257 and 508. Packing
+continues across input chunks and integrity blocks and restarts for each
+archive member.
+
+For CRC32, XOR, and sum8, each symbol contributes two little-endian bytes.
+The reader checks block markers, block integrity, exact column count, and
+zero padding. The exact punched byte count comes from `# punched-size:` for
+a single file, or the `punched=` field on `@file` or `@endfile` for an
+archive member. Unknown-length streams supply the count in the trailer.
+The count describes bytes after any compression and Base85 transfer encoding.
+
+A zero-byte payload has no columns and no padding. Unlike v8, v9 uses only full holes and blanks.
+
+The [v9 example](Examples/message-v9.Tape) uses an identity transfer.
+Select **v9 nine-channel binary (Base512)** in the app or pass `--format v9`
+to `--encode-file` or `--pack-folder`. The default write format is v7.
+
+---
+
 ## Approximate file size
 
 Sizes below are for the **`.Tape` text file** when the strip holds **raw** punched bytes (no payload compression, no Base85). Real files also grow or shrink if you enable **Compress** or **Base85** on the *payload* before packing — that is independent of format version.
@@ -304,8 +339,9 @@ Sizes below are for the **`.Tape` text file** when the strip holds **raw** punch
 | **v6** | ~**10** B (ASCII 9-char + `\n`) | **24** |
 | **v7** (default) | ~**10** B (ASCII 9-char + `\n`) | **32** |
 | **v8** (experimental) | ~**18** B (16 hex + `o` + `\n`) | **64** |
+| **v9** | **11** B (10 ASCII + `\n`) | **9** |
 
-v3–v7 share ~10 B/col text cost; **v8** tokens are longer (~18 B) but still win on large N because of 8× fewer columns.
+v3–v7 share ~10 B/col text cost; **v8** tokens are longer (~18 B) but still win on large N because of 8× fewer columns. v9 uses 11 B per column, but needs only about 8/9 as many columns as v3.
 
 ### Relative body size (raw payload, large N)
 
@@ -317,13 +353,15 @@ v3–v7 share ~10 B/col text cost; **v8** tokens are longer (~18 B) but still wi
 | **v6** | ~0.33× | ~33% |
 | **v7** | 0.25× | ~25% |
 | **v8** | **0.125×** | **~20–25%** (longer tokens offset some savings) |
+| **v9** | **~0.889×** | **~97.8%** |
 
 **Rules of thumb**
 
 1. **v1 → v3**: often **~65–70% smaller**.
 2. **v3 → v7** (default): about **¼** the columns; body ~**25%** of v3.
 3. **v3 → v8** (experimental): about **⅛** the columns; body often **~⅕–¼** of v3 despite longer tokens.
-4. **With Auto compression**, format savings apply to the remaining punched length.
+4. **v3 → v9**: about 11.1% fewer columns, but only about 2.2% smaller token body (excluding headers and integrity markers).
+5. **With Auto compression**, format savings apply to the remaining punched length.
 
 ---
 
@@ -341,10 +379,11 @@ Listed in **version order** (same as the Format picker). Default write is **v7**
 | **v6 octal** | Eight depths (24 bits/col) |
 | **v7 hexadecimal** | **Default**; 16 discrete depths (32 bits/col); multilevel-punch look |
 | **v8 base-256 — experimental maximum density** | Densest (64 bits/col); grayscale “byte grid”; longer tokens |
+| **v9 nine-channel binary (Base512)** | Classic binary look with one extra data channel; 9 bits/col, 512 patterns |
 
 ### Note on “7-bit-safe”
 
-**v3–v8** make the **punched column lines** pure ASCII. Header names and archive paths may still be UTF-8.
+**v3–v9** make the **punched column lines** pure ASCII. Header names and archive paths may still be UTF-8.
 
 ### Suggested filenames
 
@@ -353,7 +392,7 @@ Listed in **version order** (same as the Format picker). Default write is **v7**
 ```
 
 Examples: `letter-v7.Tape` (default dialect), `backup-v3.Tape`, `dense-v8.Tape`.  
-A trailing `-v1`…`-v8` is replaced on re-save (suffixes are not stacked).
+A trailing `-v1`…`-v9` is replaced on re-save (suffixes are not stacked).
 
 ---
 
@@ -461,7 +500,7 @@ a3f201o00ffc80011
 
 ## Related
 
-- [README.md](README.md) — features, usage, build (app **1.12.1**)
+- [README.md](README.md) — features, usage, build (app **1.12.2**)
 - [CHANGELOG.md](CHANGELOG.md) — release history
 - [SECURITY.md](SECURITY.md) — what PaperTape is / is not from a security standpoint
-- `Examples/*.Tape` — samples (`message-v1.Tape` … `message-v8.Tape`)
+- `Examples/*.Tape` — samples (`message-v1.Tape` … `message-v9.Tape`)

@@ -19,16 +19,16 @@ enum TapeEngine {
 
     static let fileExtension = "Tape"
     /// Highest `.Tape` format version this build can read.
-    static let formatVersion = 8
+    static let formatVersion = 9
     static let channelCount = 8
 
     /// Suggested `.Tape` filename with version suffix, e.g. `notes-v8.Tape`.
-    /// Strips a trailing `-v1`…`-v8` from `stem` so re-saves do not stack suffixes.
+    /// Strips a trailing `-v1`…`-v9` from `stem` so re-saves do not stack suffixes.
     static func suggestedTapeFilename(stem: String, format: TapeFileFormat) -> String {
         var base = stem.trimmingCharacters(in: .whitespacesAndNewlines)
         if base.isEmpty { base = "untitled" }
         // Drop prior version tag: "report-v3" → "report"
-        if let r = base.range(of: #"-v[1-8]$"#, options: .regularExpression) {
+        if let r = base.range(of: #"-v[1-9]$"#, options: .regularExpression) {
             base = String(base[..<r.lowerBound])
         }
         if base.isEmpty { base = "untitled" }
@@ -65,6 +65,7 @@ enum TapeEngine {
         /// v8: base-256 — experimental maximum density; each channel is a full byte
         /// (grayscale 0…255); 8 bytes → 1 column (**64 bits/column**). Tokens: hex pairs + `o`.
         case v8 = 8
+        case v9 = 9
 
         var id: Int { rawValue }
 
@@ -77,6 +78,7 @@ enum TapeEngine {
             case .v5: return "v5 quaternary"
             case .v6: return "v6 octal"
             case .v7: return "v7 hexadecimal"
+            case .v9: return "v9 nine-channel binary (Base512)"
             case .v8: return "v8 base-256 — experimental maximum density"
             }
         }
@@ -91,6 +93,7 @@ enum TapeEngine {
             case .v6: return "v6"
             case .v7: return "v7"
             case .v8: return "v8"
+            case .v9: return "v9"
             }
         }
 
@@ -110,6 +113,8 @@ enum TapeEngine {
                 return "Octal ASCII: 8 calibrated depths, o feed. 3 bytes/column (24 bits, linear-time)."
             case .v7:
                 return "Hexadecimal ASCII: 16 calibrated depths, o feed. 4 bytes/column (32 bits, linear-time). Default write format."
+            case .v9:
+                return "Nine binary data channels and a separate sprocket. Continuous 9-bit columns (512 patterns)."
             case .v8:
                 return "Experimental maximum density: each channel is a full byte (grayscale 0–255). 8 bytes/column (64 bits). Tokens: hex pairs + o feed (e.g. a3f201o00ffc800). Less classic punch-depth look."
             }
@@ -123,7 +128,7 @@ enum TapeEngine {
 
         /// Whether column glyphs are 1-byte ASCII (v8 uses multi-char hex tokens but still ASCII).
         var usesAsciiGlyphs: Bool {
-            self == .v3 || self == .v4 || self == .v5 || self == .v6 || self == .v7 || self == .v8
+            self == .v3 || self == .v4 || self == .v5 || self == .v6 || self == .v7 || self == .v8 || self == .v9
         }
 
         /// Whether this dialect writes ternary (3-state) channels with base-6561 packing.
@@ -155,6 +160,7 @@ enum TapeEngine {
             case .v6: return .octal
             case .v7: return .hexadecimal
             case .v8: return .base256
+            case .v9: return .base512
             default: return .binary
             }
         }
@@ -170,11 +176,12 @@ enum TapeEngine {
             case .v6: return "octal"
             case .v7: return "hexadecimal"
             case .v8: return "base256"
+            case .v9: return "base512"
             }
         }
 
-        /// Choices shown in the UI (version order v1…v8). Default write remains `.defaultWrite` (v7).
-        static var uiCases: [TapeFileFormat] { [.v1, .v2, .v3, .v4, .v5, .v6, .v7, .v8] }
+        /// Choices shown in the UI (version order v1…v9). Default write remains `.defaultWrite` (v7).
+        static var uiCases: [TapeFileFormat] { [.v1, .v2, .v3, .v4, .v5, .v6, .v7, .v8, .v9] }
 
         /// Default when writing new files (v7 hex — practical multilevel density).
         static let defaultWrite: TapeFileFormat = .v7
@@ -190,6 +197,7 @@ enum TapeEngine {
             case "v5", "5", "quaternary", "quat", "base65536": return .v5
             case "v6", "6", "octal", "oct", "base16777216": return .v6
             case "v7", "7", "hex", "hexadecimal", "base4294967296": return .v7
+            case "v9", "9", "base512", "base-512", "b512": return .v9
             case "v8", "8", "base256", "b256", "base-256", "byte", "dense": return .v8
             default: return nil
             }
@@ -277,6 +285,7 @@ enum TapeEngine {
             case .v6: return .octal
             case .v7: return .hexadecimal
             case .v8: return .base256
+            case .v9: return .ascii
             }
         }
     }
@@ -438,6 +447,20 @@ enum TapeEngine {
         /// Radix for `trits`: 3/4/8/16 = multilevel; **0** = base-256 (byte channels).
         var multistateRadix: UInt8 = 3
 
+        var isBase512: Bool { holes.count == 9 }
+
+        var base512Value: UInt32 {
+            holes.enumerated().reduce(0) { value, entry in
+                entry.element ? value | (1 << entry.offset) : value
+            }
+        }
+
+        init(id: Int, base512Value: UInt32) {
+            self.id = id
+            self.trits = nil
+            self.holes = (0..<9).map { (base512Value >> $0) & 1 != 0 }
+        }
+
         var isTernary: Bool { trits != nil && multistateRadix == 3 }
         var isQuaternary: Bool { trits != nil && multistateRadix == 4 }
         var isOctal: Bool { trits != nil && multistateRadix == 8 }
@@ -573,6 +596,10 @@ enum TapeEngine {
 
         /// Bytes contributing to integrity CRC/XOR/SUM8 for this column.
         var integrityBytes: [UInt8] {
+            if isBase512 {
+                let value = base512Value
+                return [UInt8(truncatingIfNeeded: value), UInt8(value >> 8)]
+            }
             if isBase256 {
                 return TapeEngine.base256IntegrityBytes(base256Bytes)
             }
@@ -812,6 +839,18 @@ enum TapeEngine {
         /// Bytes as they appear after compress/Base85 and *before* multi-state packing.
         /// For binary tapes this is one byte per column.
         var punchedData: Data {
+            if packing == .base512 {
+                var decoder = Base512Decoder()
+                var output = Data()
+                for column in columns { decoder.append(column.base512Value, to: &output) }
+                if isPartialPreview { return output }
+                do {
+                    try decoder.finish(byteCount: Int64(packedByteCount), to: &output)
+                    return output
+                } catch {
+                    return Data()
+                }
+            }
             if packing.isBase256 {
                 let cols = columns.map(\.base256Bytes)
                 let count = Self.densePackedByteCount(
@@ -941,6 +980,8 @@ enum TapeEngine {
                 return columnCount * 3
             case .hexadecimal:
                 return columnCount * 4
+            case .base512:
+                return columnCount + columnCount / 8
             case .base256:
                 return columnCount * 8
             case .ternaryFull, .binary:
@@ -975,6 +1016,8 @@ enum TapeEngine {
                 return min(maxBytes, digitCount * 3)
             case .hexadecimal:
                 return min(maxBytes, digitCount * 4)
+            case .base512:
+                return min(maxBytes, digitCount + digitCount / 8)
             case .base256:
                 return min(maxBytes, digitCount * 8)
             case .binary:
@@ -1034,7 +1077,15 @@ enum TapeEngine {
                 )
             }
             var stage: Data
-            if isPartialPreview, packing.isMultistate {
+            if packing == .base512, !isPartialPreview {
+                guard integrity?.allOK == true || columns.isEmpty else {
+                    throw TapeEngine.base512Error("damaged integrity blocks")
+                }
+                var decoder = Base512Decoder()
+                stage = Data()
+                for column in columns { decoder.append(column.base512Value, to: &stage) }
+                try decoder.finish(byteCount: Int64(packedByteCount), to: &stage)
+            } else if isPartialPreview, packing.isMultistate {
                 stage = punchedData // already limited for partial multi-state
                 if stage.isEmpty {
                     throw FormatError.io(
@@ -1060,6 +1111,9 @@ enum TapeEngine {
                     }
                     throw error
                 }
+            }
+            if packing == .base512, !isPartialPreview, stage.count != originalSize {
+                throw TapeEngine.base512Error("incorrect original size")
             }
             if originalSize > 0, stage.count > originalSize, !isCompressed, transferEncoding == .identity {
                 stage = Data(stage.prefix(originalSize))
@@ -1472,6 +1526,11 @@ enum TapeEngine {
     /// - ASCII (v3): `*` / `.` / `o`  e.g. `...o*..*.`
     /// - Ternary (v4): `*` full / `+` mid / `.` blank / `o` feed
     static func visualToken(for column: Column, style: GlyphStyle = .unicode) -> String {
+        if column.isBase512 {
+            var glyphs = column.holes.map { $0 ? "*" : "." }
+            glyphs.insert("o", at: 3)
+            return glyphs.joined()
+        }
         if style == .base256 || column.isBase256 {
             return base256VisualToken(bytes: column.base256Bytes)
         }
@@ -1647,7 +1706,8 @@ enum TapeEngine {
             return "(empty tape)"
         }
 
-        let multistate = document.packing.isMultistate
+        let nineChannels = document.packing == .base512
+        let multistate = (document.packing.isMultistate && !nineChannels)
             || cols.contains(where: \.isMultistate)
         let quaternary = document.packing.isQuaternary
             || cols.contains(where: \.isQuaternary)
@@ -1734,14 +1794,14 @@ enum TapeEngine {
                 default: return holeGlyph
                 }
             }
-            return col.holes[channelIndex] ? holeGlyph : blankGlyph
+            return col.channelLevel(channelIndex) > 0 ? holeGlyph : blankGlyph
         }
 
         // Visual order top→bottom: channel 8 … channel 4, feed, channel 3 … channel 1
         var lines: [String] = []
         lines.append("┌\(edge)┐")
 
-        for ch in (4...8).reversed() {
+        for ch in (4...(nineChannels ? 9 : 8)).reversed() {
             let glyphs: [Character] = cols.map { channelGlyph($0, channelIndex: ch - 1) }
             lines.append(row("ch\(ch)", values: glyphs))
         }
@@ -1776,7 +1836,7 @@ enum TapeEngine {
                 else { kind = "ternary" }
                 lines.append("  (\(kind) pack — \(cols.count) col\(cols.count == 1 ? "" : "s"))")
             }
-        } else {
+        } else if !nineChannels {
             // Legend of printable characters under the tape (1 column = 1 byte)
             let legend = cols.map { col -> String in
                 if let c = col.printableChar {
@@ -1970,7 +2030,13 @@ enum TapeEngine {
         let punchedByteCount: Int
         let packing: PackingMode
         let packChunk: Int
-        if fileFormat.usesBase256Packing {
+        if fileFormat == .v9 {
+            let payload = document.punchedData
+            packing = .base512
+            packChunk = 0
+            punchedByteCount = payload.count
+            writeColumns = base512Columns(from: payload)
+        } else if fileFormat.usesBase256Packing {
             let binaryPayload: Data
             if document.packing.isMultistate {
                 binaryPayload = document.punchedData
@@ -2056,12 +2122,14 @@ enum TapeEngine {
             "# block-size: \(blockSize)",
             "# integrity: crc32+xor+sum8",
             "# columns: \(fileFormat.columnsHeaderValue)",
-            "# channels: \(channelCount)",
+            "# channels: \(fileFormat == .v9 ? 9 : channelCount)",
             "# bit-order: channel-1-lsb",
-            "# layout: ch1 ch2 ch3 feed ch4 ch5 ch6 ch7 ch8",
+            "# layout: ch1 ch2 ch3 feed ch4 ch5 ch6 ch7 ch8\(fileFormat == .v9 ? " ch9" : "")",
             "# glyphs: \(glyphStyle.headerDescription)",
         ]
-        if packing.isTernary {
+        if packing == .base512 {
+            headerLines += ["# packing: b512", "# packing-base: 512", "# channel-states: 2"]
+        } else if packing.isTernary {
             headerLines.append("# packing: \(packing.rawValue)")
             headerLines.append("# packing-base: \(ternaryBase)")
             headerLines.append("# channel-states: 3")
@@ -2293,7 +2361,9 @@ enum TapeEngine {
             if t.hasPrefix("# PaperTape File v") {
                 let vStr = t.replacingOccurrences(of: "# PaperTape File v", with: "")
                 let ver = Int(vStr.trimmingCharacters(in: .whitespaces)) ?? 0
-                if ver >= 8 {
+                if ver == 9 {
+                    packing = .base512
+                } else if ver >= 8 {
                     packing = .base256
                 } else if ver >= 7 {
                     packing = .hexadecimal
@@ -2348,7 +2418,7 @@ enum TapeEngine {
             let tokenPart = t.split(separator: "#", maxSplits: 1)
                 .first.map(String.init)?
                 .trimmingCharacters(in: .whitespaces) ?? t
-            guard let col = parseColumnToken(
+            guard let col = packing == .base512 ? parseBase512Token(tokenPart) : parseColumnToken(
                 tokenPart,
                 preferTernary: preferTernary,
                 preferQuaternary: preferQuaternary,
@@ -2360,7 +2430,9 @@ enum TapeEngine {
                 more = true
                 break
             }
-            if preferB256 {
+            if packing == .base512 {
+                cols.append(Column(id: cols.count, base512Value: col.base512Value))
+            } else if preferB256 {
                 cols.append(Column(id: cols.count, base256Bytes: col.base256Bytes))
             } else if preferHex {
                 cols.append(Column(id: cols.count, hexadecimalValue: col.hexadecimalValue))
@@ -2419,11 +2491,14 @@ enum TapeEngine {
     }
 
     private static func deserializeHeadered(_ text: String) throws -> TapeDocument {
+        var exactPunchedSize: Int?
+        var contradictoryPunchedSize = false
         // 0 until `# PaperTape File vN` is seen — do not default to latest formatVersion
         // or missing-version files would be forced into octal packing.
         var version = 0
         var name = "decoded.bin"
         var size = 0
+        var declaredSize: Int?
         var punchedSize = 0
         var compression = CompressionKind.none
         var transfer = TransferEncoding.identity
@@ -2445,6 +2520,8 @@ enum TapeEngine {
                 let raw = String(trimmed.dropFirst("# punched-size:".count))
                     .trimmingCharacters(in: .whitespaces)
                 if let n = Int(raw), n >= 0 {
+                    if let previous = exactPunchedSize, previous != n { contradictoryPunchedSize = true }
+                    exactPunchedSize = n
                     punchedSize = n
                 }
             }
@@ -2468,7 +2545,8 @@ enum TapeEngine {
                     continue
                 }
                 if trimmed.hasPrefix("# size:") {
-                    size = Int(String(trimmed.dropFirst("# size:".count)).trimmingCharacters(in: .whitespaces)) ?? 0
+                    declaredSize = Int(trimmed.dropFirst("# size:".count).trimmingCharacters(in: .whitespaces))
+                    size = declaredSize ?? 0
                     continue
                 }
                 if trimmed.hasPrefix("# punched-size:") {
@@ -2574,7 +2652,9 @@ enum TapeEngine {
         }
 
         // Infer dense packing from version / columns header when packing field omitted.
-        if packing == .binary {
+        if version == 9 {
+            packing = .base512
+        } else if packing == .binary {
             if version >= 8 || columnsHeader == "base256" || columnsHeader == "b256" {
                 packing = .base256
             } else if version >= 7 || columnsHeader == "hexadecimal" || columnsHeader == "hex" {
@@ -2635,20 +2715,23 @@ enum TapeEngine {
                 current.marker = parseBlockMarker(trimmed)
                 continue
             }
-            if trimmed.hasPrefix("#") { continue }
+            if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
 
             let tokenPart = trimmed.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)
                 .first
                 .map(String.init)?
                 .trimmingCharacters(in: .whitespaces) ?? trimmed
-            guard let col = parseColumnToken(
+            guard let col = packing == .base512 ? parseBase512Token(tokenPart) : parseColumnToken(
                 tokenPart,
                 preferTernary: preferTernary,
                 preferQuaternary: preferQuaternary,
                 preferOctal: preferOctal,
                 preferHexadecimal: preferHex,
                 preferBase256: preferB256
-            ) else { continue }
+            ) else {
+                if packing == .base512 { throw base512Error("invalid column token") }
+                continue
+            }
             current.columns.append(col)
         }
         pushCurrent()
@@ -2658,6 +2741,35 @@ enum TapeEngine {
             // keep as-is
         } else if !hasMarkers && sections.isEmpty {
             // no data
+        }
+
+        if packing == .base512 {
+            var expectedOffset = 0
+            for (index, section) in sections.enumerated() {
+                guard section.columns.count <= blockSize else { throw base512Error("oversized block") }
+                let m = section.marker
+                // Archive offsets and indices restart at each member.
+                if containerMode != "archive",
+                   m?.off != expectedOffset || m?.index != index {
+                    throw base512Error("invalid block offset")
+                }
+                try validateBase512Block(section.columns, stored: m.map { ($0.crc, $0.xor, $0.sum, $0.len) })
+                expectedOffset += section.columns.count
+            }
+            if containerMode != "archive" {
+                guard !contradictoryPunchedSize, let exactPunchedSize else {
+                    throw base512Error("missing or contradictory punched size")
+                }
+                var decoder = Base512Decoder()
+                var output = Data()
+                for section in sections {
+                    for column in section.columns { decoder.append(column.base512Value, to: &output) }
+                }
+                try decoder.finish(byteCount: Int64(exactPunchedSize), to: &output)
+                if compression == .none, transfer == .identity, let declaredSize, declaredSize != exactPunchedSize {
+                    throw base512Error("original and punched sizes differ")
+                }
+            }
         }
 
         var columns: [Column] = []
@@ -2707,7 +2819,9 @@ enum TapeEngine {
             ))
 
             for col in section.columns {
-                if preferB256 {
+                if packing == .base512 {
+                    columns.append(Column(id: columns.count, base512Value: col.base512Value))
+                } else if preferB256 {
                     columns.append(Column(id: columns.count, base256Bytes: col.base256Bytes))
                 } else if preferHex {
                     columns.append(Column(id: columns.count, hexadecimalValue: col.hexadecimalValue))
@@ -2801,6 +2915,9 @@ enum TapeEngine {
             reindexed = Array(reindexed.prefix(denseColumnHint))
                 .enumerated()
                 .map {
+                    if packing == .base512 {
+                        return Column(id: $0.offset, base512Value: $0.element.base512Value)
+                    }
                     if preferB256 {
                         return Column(id: $0.offset, base256Bytes: $0.element.base256Bytes)
                     }
@@ -3867,7 +3984,7 @@ enum TapeEngine {
         }
 
         // Stream writer dense formats: non-multiple lengths and trailer punched-size.
-        for fmt in [TapeFileFormat.v5, .v6, .v7, .v8] {
+        for fmt in [TapeFileFormat.v5, .v6, .v7, .v8, .v9] {
             do {
                 let tmp = FileManager.default.temporaryDirectory
                     .appendingPathComponent("PaperTapeStream\(fmt.shortName)-\(UUID().uuidString).Tape")
@@ -3903,6 +4020,7 @@ enum TapeEngine {
                 case .v6: expectPack = "oct"
                 case .v7: expectPack = "hex"
                 case .v8: expectPack = "b256"
+                case .v9: expectPack = "b512"
                 default: expectPack = "?"
                 }
                 if !head.contains("# packing: \(expectPack)") {
@@ -3928,7 +4046,7 @@ enum TapeEngine {
         }
 
         // Unknown-size stream: header punched-size unknown; trailer only — must trim pad.
-        for fmt in [TapeFileFormat.v4, .v5, .v6, .v7, .v8] {
+        for fmt in [TapeFileFormat.v4, .v5, .v6, .v7, .v8, .v9] {
             do {
                 let tmp = FileManager.default.temporaryDirectory
                     .appendingPathComponent("PaperTapeUnk\(fmt.shortName)-\(UUID().uuidString).Tape")
@@ -4030,8 +4148,9 @@ enum TapeEngine {
             }
         }
 
+        failures.append(contentsOf: base512SelfTest())
         if failures.isEmpty {
-            return "Self-test passed (text, unicode, empty, compression, Base85, integrity, dense v4–v8, stream, folder archive)."
+            return "Self-test passed (text, unicode, empty, compression, Base85, integrity, v4–v9 packing, stream, folder archive)."
         }
         return "Self-test FAILED:\n" + failures.joined(separator: "\n")
     }
